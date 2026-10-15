@@ -1,0 +1,165 @@
+"""
+SmartFind core logic (REASON + ACT decisions). Pure Python — no Streamlit —
+so it can be tested with:  python -m unittest -v
+
+The score is a RULE-BASED SIMILARITY SCORE out of 100 comparing report details.
+It is NOT a probability and NOT proof that an item belongs to anyone.
+"""
+import re
+import unicodedata
+from datetime import datetime
+
+MATCH_THRESHOLD = 40   # minimum score listed on the Possible Matches page
+NOTIFY_THRESHOLD = 75  # minimum score that creates a (simulated, in-app) notification
+
+# ------------------------------------------------------------------
+# Campus areas. EXAMPLES ONLY — edit to match your campus.
+# Two different location texts earn partial points only if they fall in the
+# same area below (or are rooms in the same building, see compare_locations).
+# ------------------------------------------------------------------
+LOCATION_AREAS = {
+    "Library":       ["library"],
+    "Laboratory":    ["laboratory", "lab", "computer lab", "comlab"],
+    "Canteen":       ["canteen", "cafeteria"],
+    "Gymnasium":     ["gym", "gymnasium"],
+    "Study Hall":    ["study hall", "study area"],
+    "Registrar":     ["registrar"],
+}
+
+_FILLER_WORDS = {"room", "rm", "the", "at", "in", "near"}
+# Room code like "Q-5312" / "Q5312": building letters + 3-4 digits.
+# ASSUMPTION: the FIRST digit is the floor (Q-5312 = building Q, 5th floor).
+_ROOM_RE = re.compile(r"([a-z]{1,3}) ?(\d{3,4})")
+
+
+def normalize_location(text):
+    """Lower-case, strip accents/punctuation/filler words, recognise room codes and campus areas."""
+    t = unicodedata.normalize("NFKD", str(text or "")).lower()
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    t = " ".join(w for w in t.split() if w not in _FILLER_WORDS)
+    room = None
+    m = _ROOM_RE.fullmatch(t)
+    if m:
+        room = (m.group(1), m.group(2))
+        t = m.group(1) + m.group(2)          # "q 5312" and "q5312" become the same text
+    area = None
+    for name, aliases in LOCATION_AREAS.items():
+        if any(re.search(rf"\b{re.escape(a)}\b", t) for a in aliases):
+            area = name
+            break
+    return {"text": t, "room": room, "area": area}
+
+
+def compare_locations(a, b):
+    """Return (points, detail, result_label, state). Max 20 points."""
+    na, nb = normalize_location(a), normalize_location(b)
+    if not na["text"] or not nb["text"]:
+        return 0, "Location not provided in one report", "Unverified", "unverified"
+    if na["text"] == nb["text"]:
+        return 20, "Same campus room/area", "Match", "match"
+    if na["room"] and nb["room"]:
+        if na["room"][0] == nb["room"][0]:
+            if na["room"][1][0] == nb["room"][1][0]:
+                return 12, "Same building and floor", "Partial", "partial"
+            return 8, "Same building, different floor", "Partial", "partial"
+        return 0, "Different building", "Differs", "differ"
+    if na["area"] and na["area"] == nb["area"]:
+        return 12, f"Same campus area ({na['area']})", "Partial", "partial"
+    return 0, "Different location", "Differs", "differ"
+
+
+def calculate_match_score(lost, found):
+    """Similarity score out of 100.
+    Category 35, Color 20, Location 20, Date 15, Description 10.
+    A detail missing from either report is 'unverified' and earns 0 points."""
+    score, rows = 0, []
+
+    def add(rule, detail, result, pts, state):
+        nonlocal score
+        score += pts
+        rows.append({"rule": rule, "detail": detail, "result": result, "pts": pts, "state": state})
+
+    # Category (35)
+    c1, c2 = lost["category"].lower().strip(), found["category"].lower().strip()
+    if c1 == c2 and c1 != "other":
+        add("Category", "Same category", "Match", 35, "match")
+    elif c1 == c2:
+        add("Category", "Both are 'Other' (not specific)", "Partial", 10, "partial")
+    else:
+        add("Category", "Different category", "Differs", 0, "differ")
+
+    # Color (20)
+    k1, k2 = lost["color"].lower().strip(), found["color"].lower().strip()
+    if not k1 or not k2:
+        add("Color", "Color not provided in one report", "Unverified", 0, "unverified")
+    elif k1 == k2:
+        add("Color", "Same color", "Match", 20, "match")
+    elif set(k1.split()) & set(k2.split()):          # shared whole word, e.g. "Navy Blue" / "Blue"
+        add("Color", "Partly the same color", "Partial", 10, "partial")
+    else:
+        add("Color", "Different color", "Differs", 0, "differ")
+
+    # Location (20)
+    pts, detail, result, state = compare_locations(lost["location"], found["location"])
+    add("Location", detail, result, pts, state)
+
+    # Date (15)
+    try:
+        diff = abs((datetime.strptime(found["date"], "%Y-%m-%d") - datetime.strptime(lost["date"], "%Y-%m-%d")).days)
+        if diff == 0:
+            add("Date", "Same day", "Match", 15, "match")
+        elif diff <= 2:
+            add("Date", f"{diff} day(s) apart", "Close", 10, "partial")
+        elif diff <= 7:
+            add("Date", f"{diff} days apart", "Far", 5, "partial")
+        else:
+            add("Date", "More than 7 days apart", "Differs", 0, "differ")
+    except (ValueError, TypeError):
+        add("Date", "Date could not be read", "Unverified", 0, "unverified")
+
+    # Description (10)
+    d1, d2 = lost["description"].strip(), found["description"].strip()
+    if not d1 or not d2:
+        add("Description", "Description not provided in one report", "Unverified", 0, "unverified")
+    else:
+        stop = {"a", "an", "the", "with", "in", "on", "and", "is", "of", "to"}
+        words = lambda t: set(re.findall(r"[a-z0-9]+", t.lower()))   # ignores punctuation: "cover." == "cover"
+        common = (words(d1) & words(d2)) - stop
+        if len(common) >= 3:
+            add("Description", "Many shared key terms", "Similar", 10, "match")
+        elif common:
+            add("Description", "Some shared key terms", "Partial", 5, "partial")
+        else:
+            add("Description", "Different descriptions", "Differs", 0, "differ")
+    return score, rows
+
+
+def find_pairs(reports, min_score=MATCH_THRESHOLD):
+    """Unresolved lost/found pairs scoring at least min_score, best first."""
+    pairs = []
+    for lo in (r for r in reports if r["type"] == "Lost" and r["status"] != "Resolved"):
+        for fo in (r for r in reports if r["type"] == "Found" and r["status"] != "Resolved"):
+            s, rows = calculate_match_score(lo, fo)
+            if s >= min_score:
+                pairs.append((s, lo, fo, rows))
+    return sorted(pairs, key=lambda p: -p[0])
+
+
+def new_notifications(reports, existing_keys, timestamp, threshold=NOTIFY_THRESHOLD):
+    """Notifications that should be created now: open lost report (Searching) vs
+    open found report (Reported) scoring >= threshold, skipping pairs already in existing_keys.
+    These are SIMULATED in-app records — nothing is emailed."""
+    seen = set(existing_keys)
+    created = []
+    for lost in (r for r in reports if r["type"] == "Lost" and r["status"] == "Searching"):
+        for found in (r for r in reports if r["type"] == "Found" and r["status"] == "Reported"):
+            key = f"{lost['id']}_{found['id']}"
+            if key in seen:
+                continue
+            score, _ = calculate_match_score(lost, found)
+            if score >= threshold:
+                seen.add(key)
+                created.append({"key": key, "recipient": lost["user_email"], "item": lost["item"],
+                                "score": score, "time": timestamp})
+    return created
