@@ -1,33 +1,25 @@
-# SmartFind
-SmartFind - Intelligent Lost-and-Found Matching System
-# SmartFind: Intelligent Lost-and-Found System
+# SmartFind — Project Development Prompt
 
-## Project Overview
-SmartFind is a campus lost-and-found system designed to help students find lost belongings and report items they have found. It aims to make matching lost and found items easier through an intelligent matching system and AI-based object detection.
+## Project Goal
+Develop SmartFind, an intelligent campus lost-and-found system that helps students find missing belongings by matching lost-item reports with found-item reports.
 
-## Intended Features
-- **Lost-and-Found Reports:** Store and manage reports of lost and found items.
-- **Intelligent Matching:** Compare item details to identify possible matches between lost and found reports.
-- **AI Object Detection:** Use a trained YOLO model (`best.pt`) to detect school-related objects in images.
-- **Data Storage:** Use a CSV file (`data/reports.csv`) for sample report data.
-- **Testing:** Use `test_smartfind.py` to test parts of the system.
+## What Needs to Be Developed
+1. **Lost-and-Found Reporting** — Allow users to record items they have lost or found, including the item name, category, description, color, location, and date.
+2. **Intelligent Matching Agent** — Compare lost and found reports using their details and generate possible matches ranked by similarity.
+3. **AI Object Detection** — Integrate the `models/best.pt` YOLO model to detect school-related objects in uploaded images. The model is currently in the project folder but has not yet been tested in the application.
+4. **Database and Data Management** — Organize reports and matching results so the system can store, retrieve, and update item records.
+5. **User Interface** — Provide a simple interface for submitting reports, viewing possible matches, and checking item details.
+6. **Testing and Integration** — Test each component, connect the matching agent and object-detection model, fix errors, and verify that the complete system works.
 
-## Current Project Status
-The Python source files, sample CSV data, and trained model file (`models/best.pt`) have been added to the project.
+## Current Status
+The project has Python source files, sample report data, a requirements file, and the `best.pt` model. The model integration and overall system functionality still need to be verified.
 
-**Important:** The AI model has not yet been tested in the PyCharm application. The complete system and its features still need to be tested to confirm that everything works as intended.
+## Expected Result
+A working prototype that accepts lost-and-found reports, identifies potential matches, and uses AI object detection to assist with identifying items in images.
 
-## Project Files
-- `main.py` — Main program entry point.
-- `smartfind_core.py` — Core system and matching logic.
-- `smartfind_vision.py` — Intended image-processing and object-detection functions.
-- `test_smartfind.py` — Tests for the system.
-- `data/reports.csv` — Sample lost-and-found report data.
-- `models/best.pt` — Trained object-detection model.
-- `requirements.txt` — Python dependencies.
-
-## Goal
-Develop and test a working intelligent lost-and-found system that helps users identify possible matches for missing belongings.
-
-## Team Collaboration
-This repository is used by the project team to share code, test features, fix bugs, and improve SmartFind together.
+## Development Guidelines
+- Review the existing code before adding or rewriting features.
+- Reuse working code and avoid duplicating existing functionality.
+- Test changes before merging them into the main branch.
+- Document setup instructions, dependencies, known issues, and completed features.
+- Do not mark a feature as complete until it has been tested.
