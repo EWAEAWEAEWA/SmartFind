@@ -62,7 +62,11 @@ def _load_model():
     try:
         from ultralytics import YOLO
     except ImportError as exc:
-        raise RuntimeError("YOLO dependencies are missing. Install requirements.txt.") from exc
+        missing = f"{exc.name}: {exc}" if getattr(exc, "name", None) else str(exc)
+        raise RuntimeError(
+            f"YOLO could not import a required package ({missing}). "
+            "Check the deployment build logs and CPU PyTorch requirements."
+        ) from exc
     return YOLO(str(MODEL_PATH))
 
 
