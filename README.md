@@ -26,12 +26,12 @@ Set `SMARTFIND_DB_PATH` to a writable persistent SQLite path when deploying. Do 
 ## How suggestions and matches work
 
 1. A user uploads or takes a photo in the lost/found form.
-2. YOLO suggests the best-scoring trained category and its crop. The user confirms the category.
-3. The crop is analyzed for a rough dominant color. If Tesseract is installed, OCR offers a visible-text candidate; neither suggestion is treated as certain.
+2. If YOLO detects an item, the detected crop is analyzed. If it returns no box, SmartFind still runs OCR on the full photo and estimates color from its center region; the category must then be selected manually.
+3. If Tesseract is installed, OCR text is compared with a curated shortlist of up to five common brands for each of the model's 22 categories (or the combined shortlist if the category is unknown). A brand is suggested only when readable text resembles its name. These are practical shortlist examples, not measured market rankings; confirm or correct the result. Color remains a rough pixel estimate.
 4. Confirmed category, color, brand text, date, location, description, and photo thumbnail are saved in SQLite.
 5. The matching agent compares open Lost and Found reports. Brand shares the existing 10-point description allocation when either report supplies a brand (5 points each); otherwise legacy scoring is unchanged. Scores are rule-based similarity, not probabilities or proof of ownership.
 
-YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The trained model's embedded class names are used to populate the category choices. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds. OCR may miss stylized text and does not recognize logo graphics.
+YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The trained model's embedded class names are used to populate the category choices. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds; in no-detection fallback it samples the image center. OCR may miss stylized text and does not recognize logo graphics. With no detected category, OCR checks the whole photo against the combined brand shortlist, which may increase false positives; the user must confirm any suggested brand.
 
 ## Data, tests, and current limitations
 

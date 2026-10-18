@@ -183,6 +183,42 @@ class VisionScopeTests(unittest.TestCase):
         self.assertIsNone(result["category"])
         self.assertIsNone(result["bbox"])
 
+    def test_ocr_groups_words_and_ranks_common_brand_correction(self):
+        data = {
+            "text": ["Sam", "sunq", "case"],
+            "conf": ["91", "85", "98"],
+            "block_num": [1, 1, 1], "par_num": [1, 1, 1], "line_num": [1, 1, 2],
+        }
+        candidates = smartfind_vision._ocr_candidate_lines(data)
+        brands, raw_text = smartfind_vision._rank_candidates(candidates, "Mobile phone")
+        self.assertEqual(brands[0], "Samsung")
+        self.assertIn("Sam sunq", raw_text)
+
+    def test_brand_vocabulary_matches_all_trained_categories(self):
+        self.assertEqual(len(smartfind_vision.BRANDS_BY_CATEGORY), 22)
+        self.assertIn("Samsung", smartfind_vision.BRANDS_BY_CATEGORY["Mobile phone"])
+        brands, _ = smartfind_vision._rank_candidates([("SAMSUNG", 94)], "Mobile phone")
+        self.assertEqual(brands, ["Samsung"])
+
+    def test_full_photo_fallback_keeps_color_and_ocr_when_category_missing(self):
+        from unittest.mock import patch
+        from PIL import Image
+        image = Image.new("RGB", (100, 100), "black")
+        with patch.object(smartfind_vision, "estimate_dominant_color", return_value="Black"), \
+                patch.object(smartfind_vision, "read_text_candidates",
+                             return_value=(["Samsung"], ["SAMSUNG"])):
+            result = smartfind_vision._fallback_image_analysis(image, "No supported object detected")
+        self.assertIsNone(result["category"])
+        self.assertEqual(result["color"], "Black")
+        self.assertEqual(result["brand_candidates"], ["Samsung"])
+        self.assertEqual(result["source"], "image-fallback")
+
+    def test_ocr_preprocessing_upscales_small_item_crops(self):
+        from PIL import Image
+        enhanced, thresholded = smartfind_vision._prepare_ocr_images(Image.new("RGB", (100, 50), "white"))
+        self.assertGreater(enhanced.width, 100)
+        self.assertEqual(enhanced.size, thresholded.size)
+
 
 class ReportStoreTests(unittest.TestCase):
     def test_reports_persist_and_old_records_get_brand_default(self):

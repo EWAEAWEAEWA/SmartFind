@@ -5,6 +5,8 @@ item or prove ownership. OCR extracts candidate text only (it cannot recognize l
 """
 from functools import lru_cache
 from pathlib import Path
+from collections import defaultdict
+from difflib import SequenceMatcher
 import io
 import os
 import re
@@ -20,6 +22,37 @@ _COLOR_PROTOTYPES = {
     "Yellow": (235, 215, 45), "Green": (45, 145, 65), "Blue": (40, 85, 200),
     "Purple": (125, 65, 160), "Pink": (225, 125, 165), "Brown": (125, 80, 45),
 }
+
+# Small, curated OCR vocabulary for visible wordmarks. These are examples of common
+# brands for the 22 trained classes, not a promise that every product in the class
+# uses one of these brands. Logo-only marks are outside OCR's capabilities.
+BRANDS_BY_CATEGORY = {
+    "Apple-Pencil": ["Apple", "Logitech", "Adonit", "Wacom", "ESR"],
+    "Bag": ["JanSport", "Herschel", "Nike", "Adidas", "Fjallraven"],
+    "Calculator": ["Casio", "Canon", "Texas Instruments", "Sharp", "Citizen"],
+    "Charging-cable": ["Anker", "Apple", "Samsung", "UGREEN", "Baseus"],
+    "Earphones": ["Apple", "Sony", "JBL", "Samsung", "Xiaomi"],
+    "Glasses": ["Ray-Ban", "Oakley", "Gucci", "Sunnies Studios", "Gentle Monster"],
+    "Keyboard": ["Logitech", "Razer", "Corsair", "Keychron", "Redragon"],
+    "Keys": ["Yale", "Schlage", "Kwikset", "Master Lock", "ABUS"],
+    "Laptop": ["Apple", "Dell", "HP", "Lenovo", "ASUS"],
+    "Lecture-notes": ["Moleskine", "MUJI", "Kokuyo", "Campus", "Stabilo"],
+    "Markers": ["Sharpie", "EXPO", "Crayola", "Pilot", "Zebra"],
+    "Mobile phone": ["Samsung", "Apple", "Xiaomi", "Huawei", "OPPO"],
+    "Mouse": ["Logitech", "Razer", "Corsair", "Microsoft", "HP"],
+    "PC": ["HP", "Dell", "Lenovo", "ASUS", "Acer"],
+    "Pen": ["Pilot", "Parker", "Uni-ball", "Zebra", "BIC"],
+    "Screen": ["Samsung", "LG", "Dell", "ASUS", "Acer"],
+    # ID cards and plain keys often have no readable consumer brand.
+    "StudentID_card": [],
+    "Wallet": ["Coach", "Fossil", "Herschel", "Secrid", "Louis Vuitton"],
+    "Watch": ["Apple", "Casio", "Seiko", "Rolex", "Garmin"],
+    "Water bottle": ["Hydro Flask", "Stanley", "Aquaflask", "Thermos", "Klean Kanteen"],
+    "iPad-Air": ["Apple", "Logitech", "ESR", "ZAGG", "OtterBox"],
+    "iPad-Pro": ["Apple", "Logitech", "ESR", "ZAGG", "OtterBox"],
+}
+ALL_KNOWN_BRANDS = list(dict.fromkeys(
+    brand for brands in BRANDS_BY_CATEGORY.values() for brand in brands))
 
 
 @lru_cache(maxsize=1)
@@ -65,7 +98,7 @@ def classify_image(image_bytes, filename="uploaded-image"):
     results = model.predict(source=image, conf=CONFIDENCE_THRESHOLD, verbose=False)
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
-        return _empty_result("No supported object detected")
+        return _fallback_image_analysis(image, "No supported object detected; analyzed the full photo instead")
 
     best_i = int(boxes.conf.argmax().item())
     box = boxes[best_i]
@@ -83,12 +116,17 @@ def classify_image(image_bytes, filename="uploaded-image"):
                  int(crop.width * .92), int(crop.height * .92))
         inner = crop.crop(inset) if inset[2] > inset[0] and inset[3] > inset[1] else crop
         color = estimate_dominant_color(inner)
-        brand_text = read_text_candidate(crop)
+        pad_x, pad_y = max(2, int(crop.width * .06)), max(2, int(crop.height * .06))
+        ocr_crop = image.crop((max(0, x1 - pad_x), max(0, y1 - pad_y),
+                               min(image.width, x2 + pad_x), min(image.height, y2 + pad_y)))
+        brand_candidates, text_candidates = read_text_candidates(ocr_crop, category)
     else:
-        color, brand_text = None, None
+        color, brand_candidates, text_candidates = None, [], []
 
     return {"category": category, "confidence": confidence, "color": color,
-            "brand": brand_text, "bbox": (x1, y1, x2, y2), "source": "model",
+            "brand": brand_candidates[0] if brand_candidates else None,
+            "brand_candidates": brand_candidates, "text_candidates": text_candidates,
+            "bbox": (x1, y1, x2, y2), "source": "model",
             "message": "YOLO category suggestion; review it before saving."}
 
 
@@ -110,28 +148,124 @@ def estimate_dominant_color(image):
     return name
 
 
-def read_text_candidate(image):
-    """Use optional Tesseract OCR to read text; it is a candidate, never asserted as a brand."""
+def _prepare_ocr_images(image):
+    """Upscale and enhance a crop so small, low-contrast print is easier to OCR."""
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+    gray = ImageOps.grayscale(image)
+    scale = min(4, max(2, 1200 // max(gray.size)))
+    gray = gray.resize((gray.width * scale, gray.height * scale), Image.Resampling.LANCZOS)
+    gray = ImageOps.autocontrast(gray)
+    enhanced = ImageEnhance.Contrast(gray).enhance(1.8).filter(ImageFilter.SHARPEN)
+    thresholded = enhanced.point(lambda value: 255 if value > 160 else 0)
+    return enhanced, thresholded
+
+
+def _ocr_candidate_lines(data):
+    """Extract both individual words and grouped text lines from Tesseract output."""
+    groups = defaultdict(list)
+    tokens = []
+    for index, raw_text in enumerate(data.get("text", [])):
+        text = re.sub(r"[^\w&+.-]", "", str(raw_text), flags=re.UNICODE).strip("._-")
+        try:
+            confidence = float(data.get("conf", [])[index])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if len(text) < 2 or confidence < 20:
+            continue
+        # Exclude isolated punctuation/numeric noise while retaining names like 3M.
+        if not re.search(r"[a-z]", text, re.IGNORECASE):
+            continue
+        tokens.append((text, confidence))
+        key = tuple(data.get(field, [0] * len(data.get("text", [])))[index]
+                    for field in ("block_num", "par_num", "line_num"))
+        groups[key].append((text, confidence))
+
+    results = list(tokens)
+    for words in groups.values():
+        if len(words) > 1:
+            line = " ".join(word for word, _ in words)
+            mean_confidence = sum(conf for _, conf in words) / len(words)
+            results.append((line, mean_confidence))
+    return results
+
+
+def _normalize_candidate(text):
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+def _rank_candidates(scored_candidates, category=None):
+    """Rank OCR text, then return brand names supported by category-aware OCR evidence."""
+    scores = defaultdict(float)
+    originals = {}
+    for text, confidence in scored_candidates:
+        cleaned = " ".join(text.split())[:40]
+        normalized = _normalize_candidate(cleaned)
+        if len(normalized) < 2:
+            continue
+        scores[normalized] = max(scores[normalized], confidence)
+        originals.setdefault(normalized, cleaned)
+
+    ranked_text = sorted(scores, key=lambda value: scores[value], reverse=True)
+    brands = BRANDS_BY_CATEGORY.get(category, ALL_KNOWN_BRANDS)
+    brand_scores = {}
+    for brand in brands:
+        brand_normalized = _normalize_candidate(brand)
+        best = 0.0
+        for text, ocr_score in scores.items():
+            if min(len(text), len(brand_normalized)) <= 3:
+                similarity = 1.0 if text == brand_normalized else 0.0
+            else:
+                similarity = SequenceMatcher(None, text, brand_normalized).ratio()
+            # For short acronyms such as HP, only an exact read should count.
+            minimum_similarity = .72 if len(brand_normalized) >= 5 else .95
+            if similarity >= minimum_similarity:
+                best = max(best, ocr_score * similarity)
+        if best:
+            brand_scores[brand] = best
+    ranked_brands = sorted(brand_scores, key=brand_scores.get, reverse=True)[:5]
+    return ranked_brands, [originals[value] for value in ranked_text[:5]]
+
+
+def read_text_candidates(image, category=None):
+    """Return (brand candidates, raw OCR text candidates), based only on readable text."""
     try:
         import pytesseract
         from pytesseract import Output
-        data = pytesseract.image_to_data(image, output_type=Output.DICT, config="--psm 11")
-    except (ImportError, OSError, RuntimeError):
-        return None
-    candidates = []
-    for text, confidence in zip(data.get("text", []), data.get("conf", [])):
-        text = re.sub(r"[^\w&+.-]", "", str(text), flags=re.UNICODE).strip("._-")
-        try:
-            score = float(confidence)
-        except (TypeError, ValueError):
-            continue
-        if len(text) >= 2 and score >= 30:
-            candidates.append((score, text))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda pair: pair[0])[1][:40]
+        variants = _prepare_ocr_images(image)
+        candidates = []
+        for variant in variants:
+            for page_segmentation in (6, 11, 12):
+                try:
+                    data = pytesseract.image_to_data(
+                        variant, output_type=Output.DICT,
+                        config=f"--oem 3 --psm {page_segmentation}")
+                except (OSError, RuntimeError):
+                    continue
+                candidates.extend(_ocr_candidate_lines(data))
+        _, text_candidates, brand_candidates = _rank_candidates(candidates, category)
+        return brand_candidates, text_candidates
+    except ImportError:
+        return [], []
+
+
+def _fallback_image_analysis(image, message):
+    """Keep OCR/color suggestions available when YOLO cannot produce a box.
+
+    Color is sampled from a centered crop to reduce, but not eliminate, background
+    influence. Without a detected class, OCR is checked against all known brand names.
+    """
+    width, height = image.size
+    center = image.crop((int(width * .2), int(height * .2), int(width * .8), int(height * .8)))
+    color = estimate_dominant_color(center) if center.width and center.height else None
+    brand_candidates, text_candidates = read_text_candidates(image)
+    return {"category": None, "confidence": None, "color": color,
+            "brand": brand_candidates[0] if brand_candidates else None,
+            "brand_candidates": brand_candidates, "text_candidates": text_candidates,
+            "bbox": None, "source": "image-fallback", "message": message}
 
 
 def _empty_result(message):
     return {"category": None, "confidence": None, "color": None, "brand": None,
-            "bbox": None, "source": "model", "message": message}
+            "brand_candidates": [], "text_candidates": [], "bbox": None,
+            "source": "model", "message": message}

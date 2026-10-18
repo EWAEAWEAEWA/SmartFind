@@ -612,7 +612,8 @@ with body:
                         suggestion = analyze_photo(photo_bytes)
                 except (NotImplementedError, FileNotFoundError, RuntimeError, ValueError) as exc:
                     suggestion = {"category": None, "confidence": None, "color": None,
-                                  "brand": None, "message": str(exc)}
+                                  "brand": None, "brand_candidates": [], "text_candidates": [],
+                                  "message": str(exc)}
                     st.warning(f"Photo analysis is unavailable: {esc(exc)}. You can still enter the report manually.")
                 img_tag = (f'<img src="{photo_uri}" style="width:84px;height:84px;object-fit:cover;'
                            f'border-radius:10px;flex-shrink:0">') if photo_uri else ""
@@ -622,18 +623,37 @@ with body:
                     conf = suggestion["confidence"]
                     note = (f"Detection confidence: <strong>{conf:.0f}%</strong>; not a match probability. "
                             "Confirm or change the category. Brand text and color are separate suggestions.")
-                    if suggestion.get("brand"):
-                        note += f' Text read from crop: <strong>{esc(suggestion["brand"])}</strong> (confirm as brand).'
+                    brand_suggestions = suggestion.get("brand_candidates", [])
+                    if brand_suggestions:
+                        candidate_text = ", ".join(esc(candidate) for candidate in brand_suggestions)
+                        note += f' Possible brand-name reads: <strong>{candidate_text}</strong> (confirm manually).'
+                    other_text = suggestion.get("text_candidates", [])
+                    if other_text:
+                        candidate_text = ", ".join(esc(candidate) for candidate in other_text)
+                        note += f' Other OCR text: {candidate_text}.'
                     if suggestion.get("color"):
                         note += f' Pixel color estimate: <strong>{esc(suggestion["color"])}</strong> (confirm or edit).'
                     body_txt = (f'<div style="color:#2b6cb0;font-size:10px;font-weight:800">{tag}SUGGESTED CATEGORY</div>'
                                 f'<div style="font-size:17px;font-weight:800;color:#1a202c">{cat_icon} {suggestion["category"]}</div>'
                                 f'<div style="color:#4a5568;font-size:11px;margin-top:4px;line-height:1.5">{note}</div>')
                 else:
+                    fallback_notes = []
+                    if suggestion.get("color"):
+                        fallback_notes.append(
+                            f'Central-image color estimate: <strong>{esc(suggestion["color"])}</strong> '
+                            '(background may affect it).')
+                    if suggestion.get("brand_candidates"):
+                        likely = ", ".join(esc(value) for value in suggestion["brand_candidates"])
+                        fallback_notes.append(f'Possible known brand text: <strong>{likely}</strong>.')
+                    if suggestion.get("text_candidates"):
+                        raw_text = ", ".join(esc(value) for value in suggestion["text_candidates"])
+                        fallback_notes.append(f'Readable photo text: {raw_text}.')
+                    fallback_detail = " ".join(fallback_notes)
                     body_txt = ('<div style="color:#718096;font-size:10px;font-weight:800">NO SUGGESTION</div>'
-                                '<div style="font-size:13px;font-weight:700;color:#1a202c">SmartFind could not suggest a category.</div>'
-                                f'<div style="color:#4a5568;font-size:11px;margin-top:4px">Photo suggestions currently cover only: '
-                                f'{esc(suggestion.get("message") or "No trained object was detected.")} Choose the category manually below.</div>')
+                                '<div style="font-size:13px;font-weight:700;color:#1a202c">No item category detected; image analysis still ran.</div>'
+                                f'<div style="color:#4a5568;font-size:11px;margin-top:4px">'
+                                f'{esc(suggestion.get("message") or "No trained object was detected.")} '
+                                f'{fallback_detail} Choose the category manually below.</div>')
                 html(f"""<div style="display:flex;gap:14px;align-items:center;background:#ebf8ff;border:1px solid #bee3f8;
                 padding:14px;border-radius:12px;margin-top:10px">{img_tag}<div>{body_txt}</div></div>""")
 
@@ -643,9 +663,19 @@ with body:
             st.markdown("##### 📝 Step 2 — Confirm the details")
             sug_cat = suggestion["category"] if suggestion else None
             sug_col = (suggestion.get("color") if suggestion else None) or ""
-            sug_brand = (suggestion.get("brand") if suggestion else None) or ""
-            default_name = f"{sug_col} {sug_cat}".strip() if sug_cat else ""
+            brand_candidates = suggestion.get("brand_candidates", []) if suggestion else []
+            text_candidates = suggestion.get("text_candidates", []) if suggestion else []
             sig = hashlib.md5(photo_bytes).hexdigest()[:8] if photo_bytes else "nophoto"
+            sug_brand = ""
+            ocr_options = list(dict.fromkeys(brand_candidates + text_candidates))
+            if ocr_options:
+                choice = st.selectbox(
+                    "OCR text read from photo (optional; confirm if this is the brand)",
+                    ["Manual entry"] + ocr_options,
+                    key=f"ocr_brand_{rtype}_{nonce}_{sig}")
+                if choice != "Manual entry":
+                    sug_brand = choice
+            default_name = f"{sug_col} {sug_cat}".strip() if sug_cat else ""
 
             with st.form(f"form_{rtype}_{nonce}_{sig}"):
                 cat = st.selectbox("Item category *", ALL_CATEGORIES,
@@ -654,7 +684,7 @@ with body:
                 name = st.text_input("Item name (optional)", value=default_name,
                                      placeholder="Filled in from the category if left blank")
                 color = st.text_input("Color (optional; confirm image estimate)", value=sug_col, placeholder="e.g. Black")
-                brand = st.text_input("Brand (optional; confirm OCR text or enter manually)", value=sug_brand,
+                brand = st.text_input("Brand (optional; confirm/correct OCR text or enter manually)", value=sug_brand,
                                       placeholder="e.g. ASUS — OCR reads text, not logos")
                 loc = st.text_input(f"Where was it {'last seen' if is_lost else 'found'}? *",
                                     placeholder="e.g. Q-5312, Library 2nd Floor")
