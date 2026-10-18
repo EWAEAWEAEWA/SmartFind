@@ -1,7 +1,10 @@
 """Run with:  python -m unittest -v      (no Streamlit needed)"""
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import smartfind_vision
+import smartfind_store
 from smartfind_core import (NOTIFY_THRESHOLD, calculate_match_score, compare_locations,
                             find_pairs, new_notifications, normalize_location)
 
@@ -142,35 +145,62 @@ class MatchingRefinementTests(unittest.TestCase):
         _, rows = calculate_match_score(lost, found)
         self.assertEqual(state(rows, "Description")["pts"], 10)
 
+    def test_brand_is_supporting_evidence_without_inflating_score(self):
+        lost = report("L1", "Lost", brand="ASUS")
+        found = report("F1", "Found", brand="asus")
+        score, rows = calculate_match_score(lost, found)
+        self.assertEqual(state(rows, "Brand")["pts"], 5)
+        self.assertEqual(state(rows, "Description")["pts"], 5)
+        self.assertEqual(score, 100)
+
+    def test_brand_mismatch_reduces_score_and_missing_brand_is_unverified(self):
+        score, rows = calculate_match_score(report("L1", "Lost", brand="ASUS"),
+                                            report("F1", "Found", brand="Acer"))
+        self.assertEqual(state(rows, "Brand")["state"], "differ")
+        self.assertEqual(score, 95)
+        _, rows = calculate_match_score(report("L1", "Lost", brand="ASUS"), report("F1", "Found"))
+        self.assertEqual(state(rows, "Brand")["state"], "unverified")
+
 
 class VisionScopeTests(unittest.TestCase):
-    """Phase 1: only calculators are recognizable, and only by placeholder file-name keywords."""
+    """Real model metadata and image-analysis helpers are used; OCR stays optional."""
 
-    def test_only_calculator_is_in_scope(self):
-        self.assertEqual(list(smartfind_vision.AI_CATEGORIES), ["Calculator"])
+    def test_trained_model_and_embedded_categories_are_available(self):
+        self.assertTrue(smartfind_vision.MODEL_PATH.is_file())
+        self.assertEqual(smartfind_vision.RECOGNIZER_MODE, "model")
+        self.assertTrue(smartfind_vision.get_model_categories())
 
-    def test_calculator_filename_is_suggested_as_placeholder(self):
-        r = smartfind_vision.classify_image(b"", "black_casio_calculator.jpg")
-        self.assertEqual(r["category"], "Calculator")
-        self.assertEqual(r["color"], "Black")
-        self.assertEqual(r["source"], "placeholder")
-        self.assertIsNone(r["confidence"])            # placeholder must never invent a confidence
+    def test_color_estimator_returns_named_color(self):
+        from PIL import Image
+        self.assertEqual(smartfind_vision.estimate_dominant_color(Image.new("RGB", (30, 30), "red")), "Red")
 
-    def test_other_items_get_no_suggestion(self):
-        for name in ("my_phone.jpg", "id_card.png", "keys.jpg", "eyeglasses.jpg", "earphones.jpg", "camera_input.jpg"):
-            self.assertIsNone(smartfind_vision.classify_image(b"", name)["category"], name)
+    def test_invalid_image_fails_as_a_user_correctable_error(self):
+        with self.assertRaisesRegex(ValueError, "readable image"):
+            smartfind_vision.classify_image(b"not-an-image")
 
-    def test_model_mode_without_a_model_raises_instead_of_pretending(self):
-        old = smartfind_vision.RECOGNIZER_MODE
-        smartfind_vision.RECOGNIZER_MODE = "model"
+    def test_empty_photo_returns_empty_detection_shape(self):
+        result = smartfind_vision.classify_image(b"")
+        self.assertIsNone(result["category"])
+        self.assertIsNone(result["bbox"])
+
+
+class ReportStoreTests(unittest.TestCase):
+    def test_reports_persist_and_old_records_get_brand_default(self):
+        old_path = smartfind_store.DB_PATH
         try:
-            with self.assertRaises(NotImplementedError):
-                smartfind_vision.classify_image(b"", "calculator.jpg")
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "reports.db"
+                report_data = report("L1", "Lost")
+                report_data.pop("brand", None)
+                smartfind_store.seed_reports_if_empty([report_data])
+                self.assertEqual(smartfind_store.load_reports()[0]["brand"], "")
+                report_data["brand"] = "ASUS"
+                smartfind_store.save_report(report_data)
+                self.assertEqual(smartfind_store.load_reports()[0]["brand"], "ASUS")
+                smartfind_store.delete_report("L1")
+                self.assertEqual(smartfind_store.load_reports(), [])
         finally:
-            smartfind_vision.RECOGNIZER_MODE = old
-
-    def test_default_mode_is_placeholder(self):
-        self.assertEqual(smartfind_vision.RECOGNIZER_MODE, "placeholder")
+            smartfind_store.DB_PATH = old_path
 
 
 if __name__ == "__main__":

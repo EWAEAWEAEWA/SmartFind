@@ -3,7 +3,7 @@ SmartFind — An Intelligent Lost-and-Found Matching System for Campus Items
 CS 403 prototype.   Run with:  streamlit run main.py
 
 Perceive -> Reason -> Act
-  PERCEIVE : smartfind_vision.py        (PLACEHOLDER; phase 1 = calculators only; no real model yet)
+    PERCEIVE : smartfind_vision.py        (YOLO detector + crop-based color estimate + optional OCR)
   REASON   : smartfind_core.py          (working, rule-based similarity score out of 100)
   ACT      : auto_monitor_and_notify()  (in-app notification only; NO real email yet)
 
@@ -29,7 +29,8 @@ import streamlit as st
 
 from smartfind_core import (MATCH_THRESHOLD, NOTIFY_THRESHOLD, calculate_match_score,  # noqa: F401
                             find_pairs, new_notifications)
-from smartfind_vision import AI_CATEGORIES, classify_image
+from smartfind_vision import classify_image, get_model_categories
+from smartfind_store import delete_report, load_reports, save_report, seed_reports_if_empty
 
 st.set_page_config(page_title="SmartFind - Campus Lost & Found", page_icon="🔎",
                    layout="wide", initial_sidebar_state="auto")
@@ -66,12 +67,13 @@ STRETCH_SUBMIT = _stretch(st.form_submit_button)
 # CONFIGURATION  (edit here — nothing else needs to change)
 # ============================================================
 
-# Photo-recognition scope lives in smartfind_vision.py (AI_CATEGORIES).
-# Phase 1: Calculator only. Every category below can still be chosen manually.
+# Categories come from the trained model; all remain user-confirmable.
 MANUAL_ONLY_CATEGORIES = {"Smartphone": "📱", "ID Card": "🪪", "Earphones": "🎧", "Keys": "🔑",
                           "Eyeglasses": "👓", "Water Bottle": "🧴", "Umbrella": "☂️", "Other": "📦"}
 
-ALL_CATEGORIES = list(AI_CATEGORIES) + list(MANUAL_ONLY_CATEGORIES)
+MODEL_CATEGORIES = get_model_categories()
+AI_CATEGORIES = {name: {"icon": "🔎"} for name in MODEL_CATEGORIES}
+ALL_CATEGORIES = list(dict.fromkeys(MODEL_CATEGORIES + list(MANUAL_ONLY_CATEGORIES)))
 CATEGORY_ICONS = {**{k: v["icon"] for k, v in AI_CATEGORIES.items()}, **MANUAL_ONLY_CATEGORIES}
 
 PAGES = [
@@ -112,6 +114,9 @@ def next_id():
 
 
 def current_pairs():
+    # Include legacy records loaded from older databases before score calculation.
+    for report in st.session_state.reports:
+        report.setdefault("brand", "")
     return find_pairs(st.session_state.reports)
 
 
@@ -134,6 +139,12 @@ def make_thumbnail(image_bytes):
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner=False)
+def analyze_photo(image_bytes):
+    """Cache model/OCR work across Streamlit reruns for the same uploaded photo."""
+    return classify_image(image_bytes)
 
 
 def thumb(r, size=44):
@@ -159,7 +170,7 @@ def fmt_date(d):
 
 
 # ============================================================
-# SESSION STATE  (resets when the page is refreshed — no database yet)
+# SESSION STATE  (reports are loaded from SQLite on every app rerun)
 # ============================================================
 
 st.session_state.setdefault("page", "Home")
@@ -189,8 +200,18 @@ st.session_state.setdefault(
     "id_counter",
     max((int(r["id"].split("-")[-1]) for r in st.session_state.reports), default=0))
 
+if not st.session_state.get("reports_loaded", False):
+    seed_reports_if_empty(st.session_state.reports)
+    st.session_state.reports_loaded = True
+st.session_state.reports = load_reports()
+for _report in st.session_state.reports:
+    _report.setdefault("brand", "")
+st.session_state.id_counter = max(
+    st.session_state.id_counter,
+    max((int(r["id"].split("-")[-1]) for r in st.session_state.reports), default=0))
+
 # ============================================================
-# AGENT 1 — PERCEIVE: see smartfind_vision.py (placeholder; calculators only in phase 1)
+# AGENT 1 — PERCEIVE: see smartfind_vision.py (YOLO detection, crop analysis, optional OCR)
 # ============================================================
 
 # ============================================================
@@ -414,7 +435,8 @@ def show_details(rid):
     <div style="display:flex;gap:14px;margin-top:10px">{thumb(r, 88)}
     <div><div style="font-size:18px;font-weight:800">{esc(r['item'])}</div>
     <div style="font-size:13px;color:#4a5568;line-height:1.9">
-    Category: <strong>{esc(r['category'])}</strong><br>Color: <strong>{esc(r['color']) or '—'}</strong><br>
+    Category: <strong>{esc(r['category'])}</strong><br>Brand: <strong>{esc(r.get('brand', '')) or '—'}</strong><br>
+    Color: <strong>{esc(r['color']) or '—'}</strong><br>
     Location: <strong>{esc(r['location'])}</strong><br>Date: <strong>{fmt_date(r['date'])}</strong><br>
     Status: <strong>{r['status']}</strong><br>Description: {esc(r['description']) or '—'}</div></div></div>""")
 
@@ -492,10 +514,10 @@ with body:
                     padding:2px 8px;border-radius:6px">INTELLIGENT</span></div>
                   <div class="step"><div class="step-num">1</div><div>
                     <div style="font-size:12px;font-weight:700">Perceive</div>
-                    <div style="font-size:11px;color:#718096">Add a photo. Calculator recognition is the first phase (in development); other items are reported manually.</div></div></div>
+                    <div style="font-size:11px;color:#718096">YOLO detects a supported item, crops it, and suggests category, pixel color, and readable text for review.</div></div></div>
                   <div class="step"><div class="step-num">2</div><div>
                     <div style="font-size:12px;font-weight:700">Reason</div>
-                    <div style="font-size:11px;color:#718096">Compares category, color, location, date and description.</div></div></div>
+                    <div style="font-size:11px;color:#718096">Compares category, color, brand text, location, date and description.</div></div></div>
                   <div class="step"><div class="step-num">3</div><div>
                     <div style="font-size:12px;font-weight:700">Act</div>
                     <div style="font-size:11px;color:#718096">Notifies you about strong possible matches.</div></div></div>
@@ -526,18 +548,17 @@ with body:
             f'<div style="background:#f7fafc;border:1px solid #e2e8f0;padding:10px 16px;border-radius:10px;'
             f'font-size:12px;font-weight:700">{v["icon"]} {k}</div>' for k, v in AI_CATEGORIES.items())
         with st.container(key="card_supported"):
-            html(f"""<div class="eyebrow">PHOTO RECOGNITION · PHASE 1 (IN DEVELOPMENT)</div>
-            <div style="font-size:16px;font-weight:800;color:#1a202c;margin-top:4px">First item SmartFind will learn to recognize</div>
-            <div style="color:#718096;font-size:12px;margin:4px 0 14px">No recognition model is connected yet. More
-            categories will be added in later phases. Every item type can already be reported manually.</div>
+            html(f"""<div class="eyebrow">PHOTO RECOGNITION · YOLOv8</div>
+            <div style="font-size:16px;font-weight:800;color:#1a202c;margin-top:4px">{len(MODEL_CATEGORIES)} trained model categories</div>
+            <div style="color:#718096;font-size:12px;margin:4px 0 14px">YOLO suggests an item and bounding box. OCR reads visible text (not logos), while color is estimated from crop pixels. Confirm suggestions before saving.</div>
             <div style="display:flex;gap:12px;flex-wrap:wrap">{chips}</div>""")
 
         st.write("")
         status_rows = [
-            ("Photo recognition", "Not implemented yet — placeholder guesses calculators from the file name; no model analyzes the image", "warn"),
+            ("Photo recognition", f"{'YOLOv8 model loaded' if MODEL_CATEGORIES else 'Model unavailable — manual reports still work'}; category, crop, OCR text and color suggestions", "ok" if MODEL_CATEGORIES else "warn"),
             ("Matching agent", "Working — rule-based scoring", "ok"),
             ("Notifications", "In-app only (simulated) — no email is sent yet", "warn"),
-            ("Storage", "Session only — reports reset when the page is refreshed", "warn"),
+            ("Storage", "SQLite — reports persist across browser sessions on the configured disk", "ok"),
             ("Admin access", "No login — classroom prototype only, not secure for real use", "warn"),
         ]
         items = "".join(
@@ -559,7 +580,7 @@ with body:
 
         html(f"""<div class="eyebrow">NEW {rtype.upper()} REPORT</div>
         <div class="page-title">Report {rtype} Item</div>
-        <div class="page-sub">A photo is optional. Photo suggestions are limited to calculators for now (and are still a placeholder) — for anything else, choose the category yourself. Fields marked * are required.</div>""")
+        <div class="page-sub">A photo is optional. YOLO, OCR text, and pixel color are suggestions only; confirm or correct them. Fields marked * are required.</div>""")
 
         flash = st.session_state.pop("flash", None)
         if flash:
@@ -568,7 +589,7 @@ with body:
         with st.container(key="card_form"):
             # ---------------- Step 1: photo ----------------
             st.markdown("##### 📷 Step 1 — Add a photo")
-            st.caption("Optional, but it makes reporting faster and helps matching.")
+            st.caption("Optional. The trained YOLO model detects an item crop; OCR and color are best-effort suggestions that you can edit.")
             UP, CAM, NONE = "📁 Choose / upload", "📸 Take photo", "✍️ No photo"
             mode = st.radio("Photo source", [UP, CAM, NONE], horizontal=True,
                             label_visibility="collapsed", key=f"mode_{rtype}_{nonce}")
@@ -587,23 +608,24 @@ with body:
             if photo_bytes:
                 photo_uri = make_thumbnail(photo_bytes)
                 try:
-                    suggestion = classify_image(photo_bytes, photo_file.name)
-                except NotImplementedError:
-                    suggestion = None
-                    st.warning("Recognition mode is set to \"model\" but no model is connected yet.")
+                    with st.spinner("Detecting item and analyzing its crop…"):
+                        suggestion = analyze_photo(photo_bytes)
+                except (NotImplementedError, FileNotFoundError, RuntimeError, ValueError) as exc:
+                    suggestion = {"category": None, "confidence": None, "color": None,
+                                  "brand": None, "message": str(exc)}
+                    st.warning(f"Photo analysis is unavailable: {esc(exc)}. You can still enter the report manually.")
                 img_tag = (f'<img src="{photo_uri}" style="width:84px;height:84px;object-fit:cover;'
                            f'border-radius:10px;flex-shrink:0">') if photo_uri else ""
                 if suggestion and suggestion["category"]:
                     cat_icon = CATEGORY_ICONS.get(suggestion["category"], "")
-                    if suggestion["source"] == "placeholder":
-                        tag = '<span class="sim-tag">PLACEHOLDER</span>'
-                        note = ("Guessed from the <strong>file name</strong>, not from the image. "
-                                "Real image recognition is not connected yet. Please confirm or change it below.")
-                    else:
-                        tag = ""
-                        conf = suggestion["confidence"]
-                        note = (f"Model confidence: <strong>{conf:.0f}%</strong> (separate from the similarity score). "
-                                "Please confirm or change it below.")
+                    tag = '<span class="sim-tag">YOLO SUGGESTION</span>'
+                    conf = suggestion["confidence"]
+                    note = (f"Detection confidence: <strong>{conf:.0f}%</strong>; not a match probability. "
+                            "Confirm or change the category. Brand text and color are separate suggestions.")
+                    if suggestion.get("brand"):
+                        note += f' Text read from crop: <strong>{esc(suggestion["brand"])}</strong> (confirm as brand).'
+                    if suggestion.get("color"):
+                        note += f' Pixel color estimate: <strong>{esc(suggestion["color"])}</strong> (confirm or edit).'
                     body_txt = (f'<div style="color:#2b6cb0;font-size:10px;font-weight:800">{tag}SUGGESTED CATEGORY</div>'
                                 f'<div style="font-size:17px;font-weight:800;color:#1a202c">{cat_icon} {suggestion["category"]}</div>'
                                 f'<div style="color:#4a5568;font-size:11px;margin-top:4px;line-height:1.5">{note}</div>')
@@ -611,7 +633,7 @@ with body:
                     body_txt = ('<div style="color:#718096;font-size:10px;font-weight:800">NO SUGGESTION</div>'
                                 '<div style="font-size:13px;font-weight:700;color:#1a202c">SmartFind could not suggest a category.</div>'
                                 f'<div style="color:#4a5568;font-size:11px;margin-top:4px">Photo suggestions currently cover only: '
-                                f'{", ".join(AI_CATEGORIES)}. Please choose a category below.</div>')
+                                f'{esc(suggestion.get("message") or "No trained object was detected.")} Choose the category manually below.</div>')
                 html(f"""<div style="display:flex;gap:14px;align-items:center;background:#ebf8ff;border:1px solid #bee3f8;
                 padding:14px;border-radius:12px;margin-top:10px">{img_tag}<div>{body_txt}</div></div>""")
 
@@ -621,6 +643,7 @@ with body:
             st.markdown("##### 📝 Step 2 — Confirm the details")
             sug_cat = suggestion["category"] if suggestion else None
             sug_col = (suggestion.get("color") if suggestion else None) or ""
+            sug_brand = (suggestion.get("brand") if suggestion else None) or ""
             default_name = f"{sug_col} {sug_cat}".strip() if sug_cat else ""
             sig = hashlib.md5(photo_bytes).hexdigest()[:8] if photo_bytes else "nophoto"
 
@@ -630,7 +653,9 @@ with body:
                                    placeholder="Select a category")
                 name = st.text_input("Item name (optional)", value=default_name,
                                      placeholder="Filled in from the category if left blank")
-                color = st.text_input("Color (optional, helps matching)", value=sug_col, placeholder="e.g. Black")
+                color = st.text_input("Color (optional; confirm image estimate)", value=sug_col, placeholder="e.g. Black")
+                brand = st.text_input("Brand (optional; confirm OCR text or enter manually)", value=sug_brand,
+                                      placeholder="e.g. ASUS — OCR reads text, not logos")
                 loc = st.text_input(f"Where was it {'last seen' if is_lost else 'found'}? *",
                                     placeholder="e.g. Q-5312, Library 2nd Floor")
                 dt = st.date_input(f"Date {verb} *", value=date.today(), max_value=date.today())
@@ -658,9 +683,10 @@ with body:
                     rid = next_id()
                     st.session_state.reports.append({
                         "id": rid, "type": rtype, "item": item_name, "category": cat, "color": color_v,
-                        "location": loc.strip(), "date": dt.strftime("%Y-%m-%d"), "description": desc.strip(),
+                        "brand": brand.strip(), "location": loc.strip(), "date": dt.strftime("%Y-%m-%d"), "description": desc.strip(),
                         "photo": photo_uri, "status": "Searching" if is_lost else "Reported",
                         "user_email": email.strip()})
+                    save_report(st.session_state.reports[-1])
                     st.session_state.last_email = email.strip()
                     before = len(st.session_state.notifications)
                     auto_monitor_and_notify()
@@ -684,7 +710,7 @@ with body:
         html("""<div class="eyebrow">CAMPUS RECORDS</div><div class="page-title">Lost & Found Records</div>
         <div class="page-sub">Search and review submitted lost and found reports. Tap a report to see its details.</div>""")
 
-        q = st.text_input("Search", placeholder="Search by item name, category or location…",
+        q = st.text_input("Search", placeholder="Search by item name, category, brand or location…",
                           label_visibility="collapsed")
         f1, f2, f3 = st.columns(3)
         type_f = f1.selectbox("Type", ["Lost & Found", "Lost", "Found"], label_visibility="collapsed")
@@ -695,7 +721,8 @@ with body:
         recs = list(reversed(st.session_state.reports))  # newest first
         if q:
             ql = q.lower()
-            recs = [r for r in recs if ql in r["item"].lower() or ql in r["category"].lower() or ql in r["location"].lower()]
+            recs = [r for r in recs if ql in r["item"].lower() or ql in r["category"].lower()
+                    or ql in r.get("brand", "").lower() or ql in r["location"].lower()]
         if type_f != "Lost & Found":
             recs = [r for r in recs if r["type"] == type_f]
         if cat_f != "All categories":
@@ -716,7 +743,8 @@ with body:
             <div class="rec-more">View details ▾</div></summary>
             <div class="rec-detail">{thumb(r, 96)}<div>
             <strong style="font-size:14px;color:#1a202c">{esc(r['item'])}</strong><br>
-            Category: <strong>{esc(r['category'])}</strong> · Color: <strong>{esc(r['color']) or '—'}</strong><br>
+            Category: <strong>{esc(r['category'])}</strong> · Brand: <strong>{esc(r.get('brand', '')) or '—'}</strong> ·
+            Color: <strong>{esc(r['color']) or '—'}</strong><br>
             {'Last seen' if r['type'] == 'Lost' else 'Found'} at <strong>{esc(r['location'])}</strong> on <strong>{fmt_date(r['date'])}</strong><br>
             Status: <strong>{r['status']}</strong><br>
             Description: {esc(r['description']) or '—'}</div></div></details>"""
@@ -753,6 +781,7 @@ with body:
             <div style="display:flex;gap:12px;margin:8px 0 10px;align-items:center">{thumb(r, 56)}
             <div style="font-size:15px;font-weight:700">{esc(r['item'])}</div></div>
             <div style="font-size:12px;color:#4a5568;line-height:1.8">Category: <strong>{esc(r['category'])}</strong><br>
+            Brand: <strong>{esc(r.get('brand', '')) or '—'}</strong><br>
             Color: <strong>{esc(r['color']) or '—'}</strong><br>Location: <strong>{esc(r['location'])}</strong><br>
             Date: <strong>{fmt_date(r['date'])}</strong></div></div>"""
 
@@ -854,6 +883,7 @@ with body:
             new_loc = st.text_input("Location", value=r["location"])
             if st.button("Save changes", **STRETCH):
                 r["status"], r["location"] = new_status, new_loc.strip() or r["location"]
+                save_report(r)
                 st.rerun()
 
         @st.dialog("Delete report")
@@ -864,6 +894,7 @@ with body:
             st.warning(f"Delete {r['id']} — {r['item']}? This can't be undone.")
             if st.button("Delete report", type="primary", **STRETCH):
                 st.session_state.reports = [x for x in st.session_state.reports if x["id"] != rid]
+                delete_report(rid)
                 st.rerun()
 
         W = [2.6, 0.9, 1.3, 1.3, 0.8, 0.9, 0.9, 0.8]
@@ -892,6 +923,7 @@ with body:
                     if c[6].button("Resolve", key=f"a_res_{rid}", **STRETCH,
                                    disabled=r["status"] == "Resolved"):
                         r["status"] = "Resolved"
+                        save_report(r)
                         st.rerun()
                     if c[7].button("Delete", key=f"a_del_{rid}", **STRETCH):
                         delete_dialog(rid)

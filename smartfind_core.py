@@ -72,7 +72,8 @@ def compare_locations(a, b):
 def calculate_match_score(lost, found):
     """Similarity score out of 100.
     Category 35, Color 20, Location 20, Date 15, Description 10.
-    A detail missing from either report is 'unverified' and earns 0 points."""
+    When either report has a brand, description and brand share those 10 points
+    (5 each), so brand is supporting evidence without inflating the total."""
     score, rows = 0, []
 
     def add(rule, detail, result, pts, state):
@@ -118,18 +119,34 @@ def calculate_match_score(lost, found):
     except (ValueError, TypeError):
         add("Date", "Date could not be read", "Unverified", 0, "unverified")
 
-    # Description (10)
+    # Brand shares the existing 10-point description allocation when provided.
+    lost_brand = str(lost.get("brand", "") or "").strip()
+    found_brand = str(found.get("brand", "") or "").strip()
+    brand_active = bool(lost_brand or found_brand)
+    description_points = 5 if brand_active else 10
+    if brand_active:
+        if not lost_brand or not found_brand:
+            add("Brand", "Brand not provided in one report", "Unverified", 0, "unverified")
+        elif lost_brand.casefold() == found_brand.casefold():
+            add("Brand", "Same brand text", "Match", 5, "match")
+        elif set(re.findall(r"[a-z0-9]+", lost_brand.casefold())) & set(
+                re.findall(r"[a-z0-9]+", found_brand.casefold())):
+            add("Brand", "Partly shared brand text", "Partial", 2, "partial")
+        else:
+            add("Brand", "Different brand text", "Differs", 0, "differ")
+
+    # Description (10 normally; 5 when sharing its allocation with brand)
     d1, d2 = lost["description"].strip(), found["description"].strip()
     if not d1 or not d2:
-        add("Description", "Description not provided in one report", "Unverified", 0, "unverified")
+            add("Description", "Description not provided in one report", "Unverified", 0, "unverified")
     else:
         stop = {"a", "an", "the", "with", "in", "on", "and", "is", "of", "to"}
         words = lambda t: set(re.findall(r"[a-z0-9]+", t.lower()))   # ignores punctuation: "cover." == "cover"
         common = (words(d1) & words(d2)) - stop
         if len(common) >= 3:
-            add("Description", "Many shared key terms", "Similar", 10, "match")
+            add("Description", "Many shared key terms", "Similar", description_points, "match")
         elif common:
-            add("Description", "Some shared key terms", "Partial", 5, "partial")
+            add("Description", "Some shared key terms", "Partial", description_points // 2, "partial")
         else:
             add("Description", "Different descriptions", "Differs", 0, "differ")
     return score, rows

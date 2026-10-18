@@ -3,3 +3,6 @@
 __pycache__/
 *.py[cod]
 .env
+data/*.db
+data/*.db-shm
+data/*.db-wal
