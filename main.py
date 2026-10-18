@@ -287,6 +287,35 @@ st.markdown(f"""
 html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
 .stApp {{ background:#f4f7fb; }}
 
+/* Streamlit's current React-Aria roots inherit the OS theme unless styled directly. */
+[data-testid="stTextInputRootElement"],
+[data-testid="stTextAreaRootElement"],
+[data-testid="stDateInput"] [role="group"],
+[data-testid="stSelectbox"] [role="group"] {{
+    background:#fff !important; border:1px solid #cbd5e0 !important; border-radius:8px !important;
+    box-shadow:none !important;
+}}
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stDateInput"] input,
+[data-testid="stDateInput"] [role="spinbutton"],
+[data-testid="stSelectbox"] [role="group"] * {{
+    background-color:transparent !important; color:#0d2847 !important; caret-color:#2a9d8f !important;
+}}
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder,
+[data-testid="stDateInput"] input::placeholder {{ color:#718096 !important; opacity:1 !important; }}
+[data-testid="stTextInputRootElement"]:focus-within,
+[data-testid="stTextAreaRootElement"]:focus-within,
+[data-testid="stDateInput"] [role="group"]:focus-within,
+[data-testid="stSelectbox"] [role="group"]:focus-within {{
+    border-color:#2a9d8f !important; box-shadow:0 0 0 1px #2a9d8f !important;
+}}
+[data-baseweb="popover"] [role="listbox"], [data-baseweb="popover"] [role="option"] {{
+    background:#fff !important; color:#0d2847 !important;
+}}
+[data-baseweb="popover"] [role="option"]:hover {{ background:#e6fffa !important; }}
+
 /* Hide Streamlit chrome but keep the sidebar toggle */
 #MainMenu, footer, [data-testid="stDecoration"], [data-testid="stToolbar"] {{ display:none !important; }}
 header[data-testid="stHeader"] {{ background:transparent; height:0; }}

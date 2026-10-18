@@ -161,6 +161,24 @@ def _prepare_ocr_images(image):
     return enhanced, thresholded
 
 
+@lru_cache(maxsize=1)
+def _load_ocr_engine():
+    """Load RapidOCR and its bundled ONNX models once per server process."""
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR()
+
+
+def _rapidocr_candidates(images):
+    engine = _load_ocr_engine()
+    candidates = []
+    for image in images:
+        result, _ = engine(image)
+        for line in result or []:
+            if len(line) >= 3:
+                candidates.append((str(line[1]), float(line[2]) * 100))
+    return candidates
+
+
 def _ocr_candidate_lines(data):
     """Extract both individual words and grouped text lines from Tesseract output."""
     groups = defaultdict(list)
@@ -228,11 +246,17 @@ def _rank_candidates(scored_candidates, category=None):
 
 
 def read_text_candidates(image, category=None):
-    """Return (brand candidates, raw OCR text candidates), based only on readable text."""
+    """Return (brand candidates, raw OCR text candidates) using local ONNX OCR."""
+    variants = _prepare_ocr_images(image)
     try:
-        import pytesseract
-        from pytesseract import Output
-        variants = _prepare_ocr_images(image)
+        candidates = _rapidocr_candidates(variants)
+        return _rank_candidates(candidates, category)
+    except ImportError:
+        try:
+            import pytesseract
+            from pytesseract import Output
+        except ImportError:
+            return [], []
         candidates = []
         for variant in variants:
             for page_segmentation in (6, 11, 12):
@@ -243,10 +267,7 @@ def read_text_candidates(image, category=None):
                 except (OSError, RuntimeError):
                     continue
                 candidates.extend(_ocr_candidate_lines(data))
-        _, text_candidates, brand_candidates = _rank_candidates(candidates, category)
-        return brand_candidates, text_candidates
-    except ImportError:
-        return [], []
+        return _rank_candidates(candidates, category)
 
 
 def _fallback_image_analysis(image, message):

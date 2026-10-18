@@ -15,11 +15,11 @@ Open the local URL printed by Streamlit (normally `http://localhost:8501`) in a 
 
 ### OCR setup
 
-The app uses Tesseract OCR through `pytesseract`. Install the Tesseract executable on the host as well as the Python requirements. On Windows, install the Tesseract OCR application and add its installation directory to `PATH`; on Debian/Ubuntu install `tesseract-ocr`. Without the executable, object detection and color estimation still work, and the user can enter the brand manually. OCR reads visible text, not logos, and its text candidate must be confirmed as a brand by the user.
+The app uses RapidOCR with ONNX Runtime as its primary OCR engine; install it with `requirements.txt`. It does not require a separate Tesseract executable. Tesseract remains an optional fallback if RapidOCR is unavailable. OCR reads visible text, not logos, and brand candidates must be confirmed by the user.
 
 ## Browser deployment
 
-The included `Dockerfile` builds a browser-accessible container with Tesseract installed. Build and run it with Docker, publishing port `8501`; mount a persistent host directory at `/app/data` so SQLite reports survive container replacement. For Streamlit Community Cloud, deploy `main.py`, retain `models/best.pt` in the repository, and use `packages.txt` to install Tesseract. That platform's local filesystem may be ephemeral; use persistent storage before relying on it for real reports.
+The included `Dockerfile` builds a browser-accessible container. Build and run it with Docker, publishing port `8501`; mount a persistent host directory at `/app/data` so SQLite reports survive container replacement. For Streamlit Community Cloud, deploy `main.py` and retain `models/best.pt` in the repository. That platform's local filesystem may be ephemeral; use persistent storage before relying on it for real reports.
 
 Set `SMARTFIND_DB_PATH` to a writable persistent SQLite path when deploying. Do not expose the current Admin Management page to the public internet: it has no authentication or role checks and can edit/delete every report. Use a trusted private network or place the app behind an authenticated access proxy until proper user/admin authentication is implemented. Uploaded photos are stored as thumbnails in the report database.
 

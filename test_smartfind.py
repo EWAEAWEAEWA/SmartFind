@@ -194,6 +194,15 @@ class VisionScopeTests(unittest.TestCase):
         self.assertEqual(brands[0], "Samsung")
         self.assertIn("Sam sunq", raw_text)
 
+    def test_ocr_wrapper_returns_brand_and_raw_text_candidates(self):
+        from unittest.mock import patch
+        from PIL import Image
+        with patch.object(smartfind_vision, "_rapidocr_candidates", return_value=[("SAMSUNG", 94)]):
+            brands, raw_text = smartfind_vision.read_text_candidates(
+                Image.new("RGB", (240, 120), "white"), "Mobile phone")
+        self.assertIn("Samsung", brands)
+        self.assertIn("SAMSUNG", raw_text)
+
     def test_brand_vocabulary_matches_all_trained_categories(self):
         self.assertEqual(len(smartfind_vision.BRANDS_BY_CATEGORY), 22)
         self.assertIn("Samsung", smartfind_vision.BRANDS_BY_CATEGORY["Mobile phone"])
