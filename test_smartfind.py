@@ -337,11 +337,12 @@ class EmailDeliveryTests(unittest.TestCase):
         context.__enter__.return_value = server
         notification = {"recipient": "owner@example.com", "item": "Black phone", "score": 86}
         settings = {"smtp_host": "smtp.gmail.com", "smtp_port": 587,
-                    "smtp_username": "sender@gmail.com", "smtp_password": "app-password",
+                    "smtp_username": "sender@gmail.com", "smtp_password": "app pass word",
                     "app_url": "https://smartfind.streamlit.app"}
         with patch("smartfind_mail.smtplib.SMTP", return_value=context) as smtp:
             smartfind_mail.send_match_email(notification, settings)
         smtp.assert_called_once_with("smtp.gmail.com", 587, timeout=20)
+        server.login.assert_called_once_with("sender@gmail.com", "apppassword")
         message = server.send_message.call_args.args[0]
         self.assertEqual(message["To"], "owner@example.com")
         self.assertIn("86/100", message.get_content())

@@ -5,8 +5,9 @@ import ssl
 
 
 def is_configured(settings):
+    password = "".join(str(settings.get("smtp_password", "")).split())
     return all(str(settings.get(key, "")).strip()
-               for key in ("smtp_host", "smtp_username", "smtp_password"))
+               for key in ("smtp_host", "smtp_username")) and bool(password)
 
 
 def send_match_email(notification, settings):
@@ -27,9 +28,10 @@ def send_match_email(notification, settings):
     host = str(settings["smtp_host"]).strip()
     port = int(settings.get("smtp_port", 587))
     timeout = int(settings.get("smtp_timeout", 20))
+    password = "".join(str(settings["smtp_password"]).split())
     with smtplib.SMTP(host, port, timeout=timeout) as server:
         server.ehlo()
         server.starttls(context=ssl.create_default_context())
         server.ehlo()
-        server.login(str(settings["smtp_username"]).strip(), str(settings["smtp_password"]))
+        server.login(str(settings["smtp_username"]).strip(), password)
         server.send_message(message)
