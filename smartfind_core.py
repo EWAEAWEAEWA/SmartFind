@@ -164,19 +164,24 @@ def find_pairs(reports, min_score=MATCH_THRESHOLD):
 
 
 def new_notifications(reports, existing_keys, timestamp, threshold=NOTIFY_THRESHOLD):
-    """Notifications that should be created now: open lost report (Searching) vs
-    open found report (Reported) scoring >= threshold, skipping pairs already in existing_keys.
-    These are SIMULATED in-app records — nothing is emailed."""
+    """Create strong-match inbox entries for both report owners, once per recipient."""
     seen = set(existing_keys)
     created = []
     for lost in (r for r in reports if r["type"] == "Lost" and r["status"] == "Searching"):
         for found in (r for r in reports if r["type"] == "Found" and r["status"] == "Reported"):
-            key = f"{lost['id']}_{found['id']}"
-            if key in seen:
-                continue
             score, _ = calculate_match_score(lost, found)
-            if score >= threshold:
+            if score < threshold:
+                continue
+            pair_key = f"{lost['id']}_{found['id']}"
+            recipients = dict.fromkeys(
+                str(value or "").strip().casefold()
+                for value in (lost.get("user_email", ""), found.get("user_email", ""))
+                if str(value or "").strip())
+            for recipient in recipients:
+                key = f"{pair_key}_{recipient}"
+                if key in seen:
+                    continue
                 seen.add(key)
-                created.append({"key": key, "recipient": lost["user_email"], "item": lost["item"],
-                                "score": score, "time": timestamp})
+                created.append({"key": key, "pair_key": pair_key, "recipient": recipient,
+                                "item": lost["item"], "score": score, "time": timestamp})
     return created

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 import smartfind_vision
 import smartfind_store
+from smartfind_auth import resolve_role
 from smartfind_core import (NOTIFY_THRESHOLD, calculate_match_score, compare_locations,
                             find_pairs, new_notifications, normalize_location)
 
@@ -111,8 +112,23 @@ class PairAndNotificationTests(unittest.TestCase):
         reps.append(report("F1", "Found"))                               # new report arrives
         made = new_notifications(reps, set(), "now")
         self.assertEqual(len(made), 1)
-        self.assertEqual(made[0]["key"], "L1_F1")
+        self.assertEqual(made[0]["pair_key"], "L1_F1")
         self.assertEqual(made[0]["recipient"], "a@tip.edu.ph")
+
+    def test_both_report_owners_receive_match_notifications(self):
+        lost = report("L1", "Lost", user_email="owner1@example.com")
+        found = report("F1", "Found", user_email="owner2@example.com")
+        made = new_notifications([lost, found], set(), "now")
+        self.assertEqual({entry["recipient"] for entry in made},
+                         {"owner1@example.com", "owner2@example.com"})
+        self.assertEqual({entry["pair_key"] for entry in made}, {"L1_F1"})
+
+    def test_recipient_identity_is_case_normalized(self):
+        lost = report("L1", "Lost", user_email="Owner@Example.com")
+        found = report("F1", "Found", user_email="owner@example.com")
+        made = new_notifications([lost, found], set(), "now")
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0]["recipient"], "owner@example.com")
 
     def test_duplicate_notifications_are_prevented(self):
         reps = [report("L1", "Lost"), report("F1", "Found")]
@@ -129,7 +145,7 @@ class PairAndNotificationTests(unittest.TestCase):
 
     def test_each_pair_notifies_separately(self):
         reps = [report("L1", "Lost"), report("F1", "Found"), report("F2", "Found")]
-        self.assertEqual(sorted(n["key"] for n in new_notifications(reps, set(), "now")), ["L1_F1", "L1_F2"])
+        self.assertEqual(sorted(n["pair_key"] for n in new_notifications(reps, set(), "now")), ["L1_F1", "L1_F2"])
 
 
 class MatchingRefinementTests(unittest.TestCase):
@@ -209,6 +225,13 @@ class VisionScopeTests(unittest.TestCase):
         brands, _ = smartfind_vision._rank_candidates([("SAMSUNG", 94)], "Mobile phone")
         self.assertEqual(brands, ["Samsung"])
 
+    def test_brand_legal_names_and_manual_category_aliases_normalize(self):
+        self.assertEqual(smartfind_vision.normalize_brand("Samsung Electronics Co., Ltd."), "Samsung")
+        self.assertEqual(smartfind_vision.normalize_brand("Apple Inc."), "Apple")
+        self.assertEqual(smartfind_vision.normalize_brand("  Acme Labs  "), "Acme Labs")
+        self.assertIn("Samsung", smartfind_vision.brands_for_category("Smartphone"))
+        self.assertIn("Casio", smartfind_vision.brands_for_category("Calculator"))
+
     def test_full_photo_fallback_keeps_color_and_ocr_when_category_missing(self):
         from unittest.mock import patch
         from PIL import Image
@@ -246,6 +269,34 @@ class ReportStoreTests(unittest.TestCase):
                 self.assertEqual(smartfind_store.load_reports(), [])
         finally:
             smartfind_store.DB_PATH = old_path
+
+    def test_notification_inbox_is_private_and_read_state_persists(self):
+        old_path = smartfind_store.DB_PATH
+        try:
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "notifications.db"
+                smartfind_store.save_notifications([
+                    {"key": "L1_F1_owner1", "pair_key": "L1_F1", "recipient": "owner1@example.com",
+                     "item": "Phone", "score": 90, "time": "now"},
+                    {"key": "L1_F1_owner2", "pair_key": "L1_F1", "recipient": "owner2@example.com",
+                     "item": "Phone", "score": 90, "time": "now"},
+                ])
+                owner_one = smartfind_store.load_notifications("OWNER1@example.com")
+                self.assertEqual(len(owner_one), 1)
+                smartfind_store.mark_notification_read(owner_one[0]["id"], "owner2@example.com", "later")
+                self.assertEqual(len(smartfind_store.load_notifications("owner1@example.com", unread_only=True)), 1)
+                smartfind_store.mark_notification_read(owner_one[0]["id"], "owner1@example.com", "later")
+                self.assertEqual(smartfind_store.load_notifications("owner1@example.com", unread_only=True), [])
+        finally:
+            smartfind_store.DB_PATH = old_path
+
+
+class AuthenticationTests(unittest.TestCase):
+    def test_only_verified_allowlisted_identities_receive_roles(self):
+        self.assertEqual(resolve_role("Student@TIP.edu.ph", True, ["tip.edu.ph"], []), "student")
+        self.assertEqual(resolve_role("admin@example.com", True, [], ["ADMIN@example.com"]), "admin")
+        self.assertIsNone(resolve_role("user@other.edu", True, ["tip.edu.ph"], []))
+        self.assertIsNone(resolve_role("user@tip.edu.ph", False, ["tip.edu.ph"], []))
 
 
 if __name__ == "__main__":

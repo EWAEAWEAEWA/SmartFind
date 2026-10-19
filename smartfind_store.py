@@ -21,6 +21,16 @@ def _connect():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL UNIQUE,
+            pair_key TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            item TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            read_at TEXT
+        )""")
         yield connection
         connection.commit()
     except Exception:
@@ -53,6 +63,55 @@ def save_report(report):
 def delete_report(report_id):
     with _connect() as connection:
         connection.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+
+
+def notification_keys():
+    with _connect() as connection:
+        rows = connection.execute("SELECT key FROM notifications").fetchall()
+    return {row[0] for row in rows}
+
+
+def save_notifications(notifications):
+    """Insert new inbox rows once; return how many were created."""
+    if not notifications:
+        return 0
+    with _connect() as connection:
+        before = connection.total_changes
+        connection.executemany("""INSERT OR IGNORE INTO notifications
+            (key, pair_key, recipient, item, score, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)""", [
+                (entry["key"], entry["pair_key"], entry["recipient"], entry["item"],
+                 entry["score"], entry["time"])
+                for entry in notifications
+            ])
+        return connection.total_changes - before
+
+
+def load_notifications(recipient, unread_only=False):
+    query = """SELECT id, key, pair_key, recipient, item, score, created_at, read_at
+        FROM notifications WHERE recipient = ?"""
+    params = [str(recipient).strip().casefold()]
+    if unread_only:
+        query += " AND read_at IS NULL"
+    query += " ORDER BY id DESC"
+    with _connect() as connection:
+        rows = connection.execute(query, params).fetchall()
+    columns = ("id", "key", "pair_key", "recipient", "item", "score", "time", "read_at")
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def mark_notification_read(notification_id, recipient, timestamp):
+    with _connect() as connection:
+        connection.execute("""UPDATE notifications SET read_at = ?
+            WHERE id = ? AND recipient = ? AND read_at IS NULL""",
+                           (timestamp, notification_id, str(recipient).strip().casefold()))
+
+
+def mark_all_notifications_read(recipient, timestamp):
+    with _connect() as connection:
+        connection.execute("""UPDATE notifications SET read_at = ?
+            WHERE recipient = ? AND read_at IS NULL""",
+                           (timestamp, str(recipient).strip().casefold()))
 
 
 def seed_reports_if_empty(reports):

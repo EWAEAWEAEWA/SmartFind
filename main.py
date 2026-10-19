@@ -9,19 +9,13 @@ Perceive -> Reason -> Act
 
 Files (keep in the same folder):  main.py, smartfind_core.py, smartfind_vision.py, test_smartfind.py
 
-SECURITY WARNING — Admin Management has NO authentication. Anyone who can open this app
-can view, edit, resolve and delete every report. That is acceptable for a classroom demo on
-a private network only. Do not deploy publicly without adding login + role checks.
-
-NOTE ON NAVIGATION — a dedicated Notifications page can be added later by appending
-("Notifications", "🔔") to PAGES and adding an `elif active == "Notifications":` branch that
-lists st.session_state.notifications. Nav keys and highlighting follow PAGES automatically.
+Student/admin access uses verified OIDC identities. Admin role is granted only to
+email addresses explicitly listed in Streamlit secrets.
 """
 import base64
 import hashlib
 import inspect
 import io
-import re
 from datetime import date, datetime
 from html import escape as _esc
 
@@ -29,8 +23,13 @@ import streamlit as st
 
 from smartfind_core import (MATCH_THRESHOLD, NOTIFY_THRESHOLD, calculate_match_score,  # noqa: F401
                             find_pairs, new_notifications)
-from smartfind_vision import classify_image, get_model_categories
-from smartfind_store import delete_report, load_reports, save_report, seed_reports_if_empty
+from smartfind_auth import resolve_role
+from smartfind_vision import (brands_for_category, classify_image, get_model_categories,
+                              normalize_brand)
+from smartfind_store import (delete_report, load_notifications, load_reports,
+                             mark_all_notifications_read, mark_notification_read,
+                             notification_keys, save_notifications, save_report,
+                             seed_reports_if_empty)
 
 st.set_page_config(page_title="SmartFind - Campus Lost & Found", page_icon="🔎",
                    layout="wide", initial_sidebar_state="auto")
@@ -63,6 +62,40 @@ def _stretch(fn):
 STRETCH = _stretch(st.button)
 STRETCH_SUBMIT = _stretch(st.form_submit_button)
 
+
+def _current_user():
+    try:
+        auth_config = dict(st.secrets.get("auth", {}))
+        app_config = dict(st.secrets.get("smartfind", {}))
+    except Exception:
+        auth_config, app_config = {}, {}
+
+    required_auth = ("redirect_uri", "cookie_secret", "client_id", "client_secret",
+                     "server_metadata_url")
+    if any(not str(auth_config.get(key, "")).strip() for key in required_auth):
+        st.error("Sign-in is not configured yet. An administrator must add the OIDC settings to Streamlit secrets.")
+        st.info("Configure the [auth] and [smartfind] sections using the setup instructions in README.md.")
+        st.stop()
+
+    if not st.user.is_logged_in:
+        st.markdown('<div class="page-title">SmartFind sign in</div>', unsafe_allow_html=True)
+        st.caption("Use your verified campus account to submit reports and view your match notifications.")
+        st.button("Continue with Google", on_click=st.login, type="primary")
+        st.stop()
+
+    email = str(st.user.get("email", "")).strip().casefold()
+    role = resolve_role(email, st.user.get("email_verified", False),
+                        app_config.get("student_email_domains", []),
+                        app_config.get("admin_emails", []))
+    if role is None:
+        st.error("This verified account is not authorized to use SmartFind.")
+        st.button("Sign out", on_click=st.logout)
+        st.stop()
+    return {"email": email, "name": st.user.get("name") or email, "role": role}
+
+
+current_user = _current_user()
+
 # ============================================================
 # CONFIGURATION  (edit here — nothing else needs to change)
 # ============================================================
@@ -82,8 +115,14 @@ PAGES = [
     ("Report Found Item", "⌕"),
     ("Lost & Found Records", "▤"),
     ("Possible Matches", "⛓"),
-    ("Admin Management", "♙"),
+    ("Notifications", "🔔"),
 ]
+if current_user["role"] == "admin":
+    PAGES.append(("Admin Management", "♙"))
+if st.session_state.get("page") == "Admin Management" and current_user["role"] != "admin":
+    st.session_state.page = "Home"
+if st.session_state.get("page") not in [name for name, _ in PAGES]:
+    st.session_state.page = "Home"
 
 # ============================================================
 # HELPERS
@@ -122,10 +161,6 @@ def current_pairs():
 
 def get_report(rid):
     return next((r for r in st.session_state.reports if r["id"] == rid), None)
-
-
-def valid_email(e):
-    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", e.strip()))
 
 
 def make_thumbnail(image_bytes):
@@ -174,9 +209,7 @@ def fmt_date(d):
 # ============================================================
 
 st.session_state.setdefault("page", "Home")
-st.session_state.setdefault("notifications", [])
 st.session_state.setdefault("nonce", 0)          # bumped after a submit to reset the form
-st.session_state.setdefault("last_email", "")
 st.session_state.setdefault("reports", [
     {"id": "SF-2026-001", "type": "Lost", "item": "Black Scientific Calculator", "category": "Calculator",
      "color": "Black", "location": "Q-5312", "date": "2026-09-30", "photo": None,
@@ -205,7 +238,10 @@ if not st.session_state.get("reports_loaded", False):
     st.session_state.reports_loaded = True
 st.session_state.reports = load_reports()
 for _report in st.session_state.reports:
-    _report.setdefault("brand", "")
+    _stored_brand = _report.get("brand", "")
+    _report["brand"] = normalize_brand(_stored_brand)
+    if _report["brand"] != _stored_brand:
+        save_report(_report)
 st.session_state.id_counter = max(
     st.session_state.id_counter,
     max((int(r["id"].split("-")[-1]) for r in st.session_state.reports), default=0))
@@ -219,17 +255,18 @@ st.session_state.id_counter = max(
 # ============================================================
 
 # ============================================================
-# AGENT 3 — ACT   (in-app notification only — SIMULATED, no email is sent)
+# AGENT 3 — ACT   (persistent per-owner inbox notifications; no email is sent)
 # ============================================================
 
 def auto_monitor_and_notify():
-    """Create at most one simulated notification per lost/found pair."""
-    keys = {n["key"] for n in st.session_state.notifications}
-    st.session_state.notifications += new_notifications(
-        st.session_state.reports, keys, datetime.now().strftime("%b %d, %I:%M %p"))
+    """Persist one match notification per owner/report pair in the SQLite inbox."""
+    notifications = new_notifications(
+        st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
+    return save_notifications(notifications)
 
 
 auto_monitor_and_notify()
+st.session_state.notifications = load_notifications(current_user["email"])
 
 # ============================================================
 # CSS
@@ -482,8 +519,12 @@ with st.sidebar:
     <div class="menu-label">MAIN MENU</div>
     """)
     for i, (name, icon) in enumerate(PAGES):
-        if st.button(f"{icon}   {name}", key=f"nav_{i}", **STRETCH):
+        unread_count = sum(notification["read_at"] is None for notification in st.session_state.notifications)
+        label = f"{icon}   {name} ({unread_count})" if name == "Notifications" and unread_count else f"{icon}   {name}"
+        if st.button(label, key=f"nav_{i}", **STRETCH):
             navigate(name)
+    st.caption(f"{current_user['name']} · {current_user['role'].title()}")
+    st.button("Sign out", on_click=st.logout, **STRETCH)
     html("""
     <div style="margin-top:60px;background:rgba(255,255,255,.05);padding:10px 12px;border-radius:8px;
     border:1px solid rgba(255,255,255,.1)">
@@ -495,9 +536,9 @@ html(f"""
 <div class="top-header">
   <div class="breadcrumb">Campus Lost & Found &nbsp;›&nbsp; <strong>{active}</strong></div>
   <div style="display:flex;align-items:center;gap:10px">
-    <div class="user-avatar">U</div>
-    <div class="user-name"><div style="color:#2d3748;font-size:12px;font-weight:700">Campus User</div>
-    <div style="color:#a0aec0;font-size:10px">Student access</div></div>
+    <div class="user-avatar">{esc(current_user['name'][:1].upper())}</div>
+    <div class="user-name"><div style="color:#2d3748;font-size:12px;font-weight:700">{esc(current_user['name'])}</div>
+    <div style="color:#a0aec0;font-size:10px">{current_user['role'].title()}</div></div>
   </div>
 </div>
 """)
@@ -505,13 +546,14 @@ html(f"""
 body = st.container(key="body_pad")
 
 with body:
-    # Simulated in-app notification banner (Home + Possible Matches only)
+    # Personal inbox summary; full notification history is on the Notifications page.
     if st.session_state.notifications and active in ("Home", "Possible Matches"):
-        n = st.session_state.notifications[-1]
-        html(f"""<div class="notif-bar"><span class="sim-tag">SIMULATED</span>
-        <strong>In-app notification ({n['time']}):</strong> SmartFind found a possible match for
-        <strong>"{esc(n['item'])}"</strong> (similarity score {n['score']}/100). A real email to {esc(n['recipient'])}
-        would be sent here once email delivery is built. <strong>No email was sent.</strong></div>""")
+        unread = [notification for notification in st.session_state.notifications
+                  if notification["read_at"] is None]
+        if unread:
+            n = unread[0]
+            html(f"""<div class="notif-bar"><strong>New possible match:</strong>
+            \"{esc(n['item'])}\" (similarity score {n['score']}/100). View it in Notifications or Possible Matches.</div>""")
 
     # ========================================================
     # HOME
@@ -586,9 +628,9 @@ with body:
         status_rows = [
             ("Photo recognition", f"{'YOLOv8 model loaded' if MODEL_CATEGORIES else 'Model unavailable — manual reports still work'}; category, crop, OCR text and color suggestions", "ok" if MODEL_CATEGORIES else "warn"),
             ("Matching agent", "Working — rule-based scoring", "ok"),
-            ("Notifications", "In-app only (simulated) — no email is sent yet", "warn"),
+            ("Notifications", "Persistent private inbox for both report owners; no email is sent", "ok"),
             ("Storage", "SQLite — reports persist across browser sessions on the configured disk", "ok"),
-            ("Admin access", "No login — classroom prototype only, not secure for real use", "warn"),
+            ("Admin access", "Verified OIDC login with an explicit admin email allowlist", "ok"),
         ]
         items = "".join(
             f'<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #edf2f7;font-size:12px">'
@@ -693,35 +735,39 @@ with body:
             sug_cat = suggestion["category"] if suggestion else None
             sug_col = (suggestion.get("color") if suggestion else None) or ""
             brand_candidates = suggestion.get("brand_candidates", []) if suggestion else []
-            text_candidates = suggestion.get("text_candidates", []) if suggestion else []
             sig = hashlib.md5(photo_bytes).hexdigest()[:8] if photo_bytes else "nophoto"
-            sug_brand = ""
-            ocr_options = list(dict.fromkeys(brand_candidates + text_candidates))
-            if ocr_options:
-                choice = st.selectbox(
-                    "OCR text read from photo (optional; confirm if this is the brand)",
-                    ["Manual entry"] + ocr_options,
-                    key=f"ocr_brand_{rtype}_{nonce}_{sig}")
-                if choice != "Manual entry":
-                    sug_brand = choice
+            cat_index = ALL_CATEGORIES.index(sug_cat) if sug_cat in ALL_CATEGORIES else None
+            cat = st.selectbox("Item category *", ALL_CATEGORIES, index=cat_index,
+                               placeholder="Select a category", key=f"category_{rtype}_{nonce}_{sig}")
+            category_brands = brands_for_category(cat)
+            ocr_brands = [normalize_brand(value) for value in brand_candidates]
+            known_brands = list(dict.fromkeys(ocr_brands + category_brands))
+            brand_options = ["Unknown / no visible brand"] + known_brands + ["Other / not listed"]
+            suggested_brand = next((brand for brand in ocr_brands if brand in known_brands), None)
+            brand_index = brand_options.index(suggested_brand) if suggested_brand else 0
+            brand_choice = st.selectbox(
+                "Brand (optional; OCR suggestion is preselected when available)", brand_options,
+                index=brand_index, key=f"brand_choice_{rtype}_{nonce}_{sig}")
+            manual_brand = ""
+            if brand_choice == "Other / not listed":
+                manual_brand = st.text_input(
+                    "Enter brand name", placeholder="Enter the brand as shown on the item",
+                    key=f"brand_other_{rtype}_{nonce}_{sig}")
+            brand_value = (normalize_brand(manual_brand) if manual_brand.strip() else "")
+            if brand_choice not in ("Unknown / no visible brand", "Other / not listed"):
+                brand_value = normalize_brand(brand_choice)
             default_name = f"{sug_col} {sug_cat}".strip() if sug_cat else ""
 
             with st.form(f"form_{rtype}_{nonce}_{sig}"):
-                cat = st.selectbox("Item category *", ALL_CATEGORIES,
-                                   index=ALL_CATEGORIES.index(sug_cat) if sug_cat in ALL_CATEGORIES else None,
-                                   placeholder="Select a category")
                 name = st.text_input("Item name (optional)", value=default_name,
                                      placeholder="Filled in from the category if left blank")
                 color = st.text_input("Color (optional; confirm image estimate)", value=sug_col, placeholder="e.g. Black")
-                brand = st.text_input("Brand (optional; confirm/correct OCR text or enter manually)", value=sug_brand,
-                                      placeholder="e.g. ASUS — OCR reads text, not logos")
                 loc = st.text_input(f"Where was it {'last seen' if is_lost else 'found'}? *",
                                     placeholder="e.g. Q-5312, Library 2nd Floor")
                 dt = st.date_input(f"Date {verb} *", value=date.today(), max_value=date.today())
                 desc = st.text_area("Description (optional)",
                                     placeholder="Brand, case, stickers, scratches or other distinguishing features")
-                email = st.text_input("Contact email * (for notifications)", value=st.session_state.last_email,
-                                      placeholder="you@tip.edu.ph")
+                st.caption(f"Report owner: {current_user['email']}")
                 submit = st.form_submit_button(f"Submit {verb} report", **STRETCH_SUBMIT)
 
             if submit:
@@ -730,8 +776,6 @@ with body:
                     errors.append("Please choose an item category.")
                 if not loc.strip():
                     errors.append(f"Please enter where the item was {'last seen' if is_lost else 'found'}.")
-                if not valid_email(email):
-                    errors.append("Please enter a valid contact email.")
                 for e in errors:
                     st.error(e)
                 if not errors:
@@ -742,19 +786,19 @@ with body:
                     rid = next_id()
                     st.session_state.reports.append({
                         "id": rid, "type": rtype, "item": item_name, "category": cat, "color": color_v,
-                        "brand": brand.strip(), "location": loc.strip(), "date": dt.strftime("%Y-%m-%d"), "description": desc.strip(),
+                        "brand": brand_value, "location": loc.strip(), "date": dt.strftime("%Y-%m-%d"), "description": desc.strip(),
                         "photo": photo_uri, "status": "Searching" if is_lost else "Reported",
-                        "user_email": email.strip()})
+                        "user_email": current_user["email"]})
                     save_report(st.session_state.reports[-1])
-                    st.session_state.last_email = email.strip()
                     before = len(st.session_state.notifications)
                     auto_monitor_and_notify()
+                    st.session_state.notifications = load_notifications(current_user["email"])
                     n_matches = sum(1 for p in current_pairs() if rid in (p[1]["id"], p[2]["id"]))
                     msg = f"Report {rid} saved. "
                     if n_matches:
                         msg += f"SmartFind found {n_matches} possible match(es) — see Possible Matches."
                         if len(st.session_state.notifications) > before:
-                            msg += " A simulated in-app notification was created (no email sent)."
+                            msg += " A new inbox notification was created."
                         st.session_state.flash = ("success", msg)
                     else:
                         msg += "No possible matches yet — SmartFind will compare it with new reports as they arrive."
@@ -767,7 +811,7 @@ with body:
     # ========================================================
     elif active == "Lost & Found Records":
         html("""<div class="eyebrow">CAMPUS RECORDS</div><div class="page-title">Lost & Found Records</div>
-        <div class="page-sub">Search and review submitted lost and found reports. Tap a report to see its details.</div>""")
+        <div class="page-sub">Search found reports and your own lost reports. Administrators can review all records.</div>""")
 
         q = st.text_input("Search", placeholder="Search by item name, category, brand or location…",
                           label_visibility="collapsed")
@@ -778,6 +822,9 @@ with body:
                               label_visibility="collapsed")
 
         recs = list(reversed(st.session_state.reports))  # newest first
+        if current_user["role"] != "admin":
+            recs = [r for r in recs if r["type"] == "Found"
+                or r.get("user_email", "").casefold() == current_user["email"]]
         if q:
             ql = q.lower()
             recs = [r for r in recs if ql in r["item"].lower() or ql in r["category"].lower()
@@ -830,7 +877,11 @@ with body:
         and it is separate from any photo-recognition confidence.</div>""")
 
         pairs = current_pairs()
-        notified = {n["key"] for n in st.session_state.notifications}
+        if current_user["role"] != "admin":
+            pairs = [pair for pair in pairs
+                     if current_user["email"] in (pair[1].get("user_email", "").casefold(),
+                                                   pair[2].get("user_email", "").casefold())]
+        notified = {notification["pair_key"] for notification in st.session_state.notifications}
 
         def side(label, color, r):
             return f"""<div style="flex:1;min-width:0;background:#fff;border:1px solid #e2e8f0;border-top:3px solid {color};
@@ -859,8 +910,8 @@ with body:
                            f'<span style="color:{col};font-weight:700;white-space:nowrap">{x["result"]}</span></div>')
             notif_line = ""
             if f"{lo['id']}_{fo['id']}" in notified:
-                notif_line = ('<div style="margin-top:10px;font-size:11px;color:#2a4365"><span class="sim-tag">SIMULATED</span>'
-                              'In-app notification created for the owner of the lost report. No email was sent.</div>')
+                notif_line = ('<div style="margin-top:10px;font-size:11px;color:#2a4365">'
+                              'Inbox notification sent to the report owners.</div>')
             with st.container(key=f"card_match_{lo['id']}_{fo['id']}"):
                 html(f"""
                 <div class="m-top">
@@ -899,11 +950,35 @@ with body:
             <div style="font-size:12px;color:#718096;margin-top:4px;line-height:1.6">SmartFind compares every new lost and
             found report against the open reports on the other side.<br>Matches will appear here as soon as one is found.</div></div>""")
 
-        if st.session_state.notifications:
-            with st.expander(f"Notification log — simulated ({len(st.session_state.notifications)})"):
-                st.caption("These are in-app records only. Email delivery is not implemented yet.")
-                for n in reversed(st.session_state.notifications):
-                    st.write(f"{n['time']} — \"{n['item']}\" · score {n['score']} · would notify {n['recipient']}")
+    elif active == "Notifications":
+        html("""<div class="eyebrow">YOUR SMARTFIND INBOX</div>
+        <div class="page-title">Notifications</div>
+        <div class="page-sub">Strong possible matches for reports you submitted. These are in-app notices; no email is sent.</div>""")
+        notifications = load_notifications(current_user["email"])
+        unread_count = sum(notification["read_at"] is None for notification in notifications)
+        header_left, header_right = st.columns([3, 1])
+        header_left.caption(f"{len(notifications)} notifications · {unread_count} unread")
+        if unread_count and header_right.button("Mark all read", **STRETCH):
+            mark_all_notifications_read(current_user["email"], datetime.now().isoformat(timespec="seconds"))
+            st.rerun()
+        if not notifications:
+            st.info("No match notifications yet. SmartFind will add one when a strong possible match is found.")
+        for notification in notifications:
+            with st.container(key=f"card_notification_{notification['id']}"):
+                state_label = "Unread" if notification["read_at"] is None else "Read"
+                html(f"""<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+                <div><strong>Possible match for {esc(notification['item'])}</strong>
+                <div style="font-size:12px;color:#718096;margin-top:4px">Similarity {notification['score']}/100 · {esc(notification['time'])} · {state_label}</div></div>
+                <span class="pill pill-open">{state_label}</span></div>""")
+                button_cols = st.columns([1, 1, 4])
+                if notification["read_at"] is None and button_cols[0].button(
+                        "Mark read", key=f"notif_read_{notification['id']}"):
+                    mark_notification_read(notification["id"], current_user["email"],
+                                           datetime.now().isoformat(timespec="seconds"))
+                    st.rerun()
+                if button_cols[1].button("View matches", key=f"notif_matches_{notification['id']}"):
+                    navigate("Possible Matches")
+            st.write("")
 
     # ========================================================
     # ADMIN
@@ -912,10 +987,8 @@ with body:
         html("""<div class="eyebrow">RECORD ADMINISTRATION</div><div class="page-title">Lost-and-Found Management</div>
         <div class="page-sub">Review, update, resolve, or delete item reports. Changes are reflected in Records and Possible Matches.</div>""")
 
-        html("""<div class="warn-bar">🔓 <strong>Prototype only — no login.</strong> Admin Management has no
-        authentication: anyone who can open this app can view, edit, resolve and delete every report.
-        Fine for a classroom demo on a private network; <strong>not secure for real deployment</strong>
-        (a real system needs sign-in and role checks).</div>""")
+        html("""<div class="notif-bar"><strong>Administrator access.</strong> This page is available only to
+        verified accounts listed in the app's admin email allowlist.</div>""")
 
         reps = st.session_state.reports
         stats = [("ⓘ", "Total Lost Reports", sum(r["type"] == "Lost" for r in reps)),

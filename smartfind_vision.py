@@ -54,6 +54,51 @@ BRANDS_BY_CATEGORY = {
 ALL_KNOWN_BRANDS = list(dict.fromkeys(
     brand for brands in BRANDS_BY_CATEGORY.values() for brand in brands))
 
+_BRAND_ALIASES = {
+    "Apple": ("Apple Inc", "Apple Computer Inc", "Apple Computer"),
+    "Samsung": ("Samsung Electronics", "Samsung Electronics Co Ltd",
+                "Samsung Electronics Company Limited"),
+    "HP": ("Hewlett Packard", "Hewlett-Packard", "Hewlett Packard Company",
+           "HP Inc", "HP Incorporated"),
+    "Canon": ("Canon Inc", "Canon Incorporated"),
+    "Casio": ("Casio Computer", "Casio Computer Co Ltd",
+              "Casio Computer Company Limited"),
+    "Adidas": ("Adidas AG", "Adidas Group"),
+    "Nike": ("Nike Inc", "Nike Incorporated"),
+    "LG": ("LG Electronics", "LG Electronics Inc"),
+    "Xiaomi": ("Xiaomi Inc", "Xiaomi Corporation", "Xiaomi Communications"),
+    "Huawei": ("Huawei Technologies", "Huawei Technologies Co Ltd"),
+    "ASUS": ("ASUSTeK", "ASUSTeK Computer", "ASUSTeK Computer Inc"),
+}
+_BRAND_LOOKUP = {
+    re.sub(r"[^a-z0-9]", "", brand.casefold()): brand for brand in ALL_KNOWN_BRANDS
+}
+for _canonical_brand, _aliases in _BRAND_ALIASES.items():
+    for _brand_alias in _aliases:
+        _BRAND_LOOKUP[re.sub(r"[^a-z0-9]", "", _brand_alias.casefold())] = _canonical_brand
+
+
+_CATEGORY_ALIASES = {
+    "smartphone": "Mobile phone",
+    "id card": "StudentID_card",
+    "eyeglasses": "Glasses",
+    "water bottle": "Water bottle",
+}
+
+
+def brands_for_category(category):
+    """Return the curated list for a model category or its manual-form alias."""
+    category = str(category or "").strip()
+    category = _CATEGORY_ALIASES.get(category.casefold(), category)
+    return list(BRANDS_BY_CATEGORY.get(category, []))
+
+
+def normalize_brand(value):
+    """Map known brand spellings and legal-name variants to the catalog label."""
+    text = " ".join(str(value or "").strip().split())
+    key = re.sub(r"[^a-z0-9]", "", text.casefold())
+    return _BRAND_LOOKUP.get(key, text)
+
 
 @lru_cache(maxsize=1)
 def _load_model():
@@ -235,6 +280,10 @@ def _rank_candidates(scored_candidates, category=None):
         brand_normalized = _normalize_candidate(brand)
         best = 0.0
         for text, ocr_score in scores.items():
+            canonical = _BRAND_LOOKUP.get(text)
+            if canonical == brand:
+                best = max(best, ocr_score)
+                continue
             if min(len(text), len(brand_normalized)) <= 3:
                 similarity = 1.0 if text == brand_normalized else 0.0
             else:
