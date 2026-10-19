@@ -1,8 +1,11 @@
 """Run with:  python -m unittest -v      (no Streamlit needed)"""
 import unittest
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
 
+import smartfind_mail
 import smartfind_vision
 import smartfind_store
 from smartfind_auth import resolve_role
@@ -290,6 +293,28 @@ class ReportStoreTests(unittest.TestCase):
         finally:
             smartfind_store.DB_PATH = old_path
 
+    def test_legacy_notifications_are_not_queued_for_email(self):
+        old_path = smartfind_store.DB_PATH
+        try:
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "legacy.db"
+                connection = sqlite3.connect(smartfind_store.DB_PATH)
+                try:
+                    connection.execute("""CREATE TABLE notifications (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, pair_key TEXT,
+                        recipient TEXT, item TEXT, score INTEGER, created_at TEXT, read_at TEXT)""")
+                    connection.execute("""INSERT INTO notifications
+                        (key, pair_key, recipient, item, score, created_at)
+                        VALUES ('old-key', 'L1_F1', 'owner@example.com', 'Phone', 90, 'old')""")
+                    connection.commit()
+                finally:
+                    connection.close()
+                notification = smartfind_store.load_notifications("owner@example.com")[0]
+                self.assertEqual(notification["email_status"], "legacy")
+                self.assertEqual(smartfind_store.pending_notification_emails(), [])
+        finally:
+            smartfind_store.DB_PATH = old_path
+
 
 class AuthenticationTests(unittest.TestCase):
     def test_only_verified_allowlisted_identities_receive_roles(self):
@@ -297,6 +322,50 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(resolve_role("admin@example.com", True, [], ["ADMIN@example.com"]), "admin")
         self.assertIsNone(resolve_role("user@other.edu", True, ["tip.edu.ph"], []))
         self.assertIsNone(resolve_role("user@tip.edu.ph", False, ["tip.edu.ph"], []))
+
+
+class EmailDeliveryTests(unittest.TestCase):
+    def test_mail_requires_smtp_credentials(self):
+        self.assertFalse(smartfind_mail.is_configured({}))
+        self.assertTrue(smartfind_mail.is_configured({
+            "smtp_host": "smtp.gmail.com", "smtp_username": "a@example.com",
+            "smtp_password": "app-password"}))
+
+    def test_email_uses_report_owner_and_match_details(self):
+        context = MagicMock()
+        server = MagicMock()
+        context.__enter__.return_value = server
+        notification = {"recipient": "owner@example.com", "item": "Black phone", "score": 86}
+        settings = {"smtp_host": "smtp.gmail.com", "smtp_port": 587,
+                    "smtp_username": "sender@gmail.com", "smtp_password": "app-password",
+                    "app_url": "https://smartfind.streamlit.app"}
+        with patch("smartfind_mail.smtplib.SMTP", return_value=context) as smtp:
+            smartfind_mail.send_match_email(notification, settings)
+        smtp.assert_called_once_with("smtp.gmail.com", 587, timeout=20)
+        message = server.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "owner@example.com")
+        self.assertIn("86/100", message.get_content())
+        self.assertIn("https://smartfind.streamlit.app", message.get_content())
+
+    def test_failed_delivery_can_be_retried_once(self):
+        old_path = smartfind_store.DB_PATH
+        try:
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "email.db"
+                entry = {"key": "p_owner@example.com", "pair_key": "p",
+                         "recipient": "owner@example.com", "item": "Phone", "score": 90, "time": "now"}
+                smartfind_store.save_notifications([entry])
+                notification = smartfind_store.pending_notification_emails()[0]
+                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
+                smartfind_store.finish_notification_email(notification["id"], "failed", error="SMTP unavailable")
+                self.assertTrue(smartfind_store.retry_notification_email(notification["id"], "owner@example.com"))
+                self.assertFalse(smartfind_store.retry_notification_email(notification["id"], "other@example.com"))
+                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
+                smartfind_store.finish_notification_email(notification["id"], "sent", timestamp="later")
+                saved = smartfind_store.load_notifications("owner@example.com")[0]
+                self.assertEqual((saved["email_status"], saved["email_sent_at"]), ("sent", "later"))
+        finally:
+            smartfind_store.DB_PATH = old_path
 
 
 if __name__ == "__main__":

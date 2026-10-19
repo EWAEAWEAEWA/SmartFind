@@ -5,7 +5,7 @@ CS 403 prototype.   Run with:  streamlit run main.py
 Perceive -> Reason -> Act
     PERCEIVE : smartfind_vision.py        (YOLO detector + crop-based color estimate + optional OCR)
   REASON   : smartfind_core.py          (working, rule-based similarity score out of 100)
-  ACT      : auto_monitor_and_notify()  (in-app notification only; NO real email yet)
+    ACT      : auto_monitor_and_notify()  (persistent inbox + optional SMTP email)
 
 Files (keep in the same folder):  main.py, smartfind_core.py, smartfind_vision.py, test_smartfind.py
 
@@ -28,8 +28,11 @@ from smartfind_vision import (brands_for_category, classify_image, get_model_cat
                               normalize_brand)
 from smartfind_store import (delete_report, load_notifications, load_reports,
                              mark_all_notifications_read, mark_notification_read,
-                             notification_keys, save_notifications, save_report,
+                             notification_keys, pending_notification_emails,
+                             claim_notification_email, finish_notification_email,
+                             retry_notification_email, save_notifications, save_report,
                              seed_reports_if_empty)
+from smartfind_mail import is_configured, send_match_email
 
 st.set_page_config(page_title="SmartFind - Campus Lost & Found", page_icon="🔎",
                    layout="wide", initial_sidebar_state="auto")
@@ -259,11 +262,29 @@ st.session_state.id_counter = max(
 # ============================================================
 
 def auto_monitor_and_notify():
-    """Persist one match notification per owner/report pair in the SQLite inbox."""
+    """Persist owner inbox entries and deliver any queued email once."""
     notifications = new_notifications(
         st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
-    return save_notifications(notifications)
+    save_notifications(notifications)
+    if not is_configured(mail_config):
+        return
+    for notification in pending_notification_emails():
+        if not claim_notification_email(notification["id"]):
+            continue
+        try:
+            send_match_email(notification, mail_config)
+        except Exception as exc:
+            finish_notification_email(notification["id"], "failed",
+                                      error=f"{type(exc).__name__}: {exc}")
+        else:
+            finish_notification_email(notification["id"], "sent",
+                                      timestamp=datetime.now().isoformat(timespec="seconds"))
 
+
+try:
+    mail_config = dict(st.secrets.get("mail", {}))
+except Exception:
+    mail_config = {}
 
 auto_monitor_and_notify()
 st.session_state.notifications = load_notifications(current_user["email"])
@@ -628,7 +649,7 @@ with body:
         status_rows = [
             ("Photo recognition", f"{'YOLOv8 model loaded' if MODEL_CATEGORIES else 'Model unavailable — manual reports still work'}; category, crop, OCR text and color suggestions", "ok" if MODEL_CATEGORIES else "warn"),
             ("Matching agent", "Working — rule-based scoring", "ok"),
-            ("Notifications", "Persistent private inbox for both report owners; no email is sent", "ok"),
+            ("Notifications", "Persistent private inbox for both owners; SMTP email when configured", "ok"),
             ("Storage", "SQLite — reports persist across browser sessions on the configured disk", "ok"),
             ("Admin access", "Verified OIDC login with an explicit admin email allowlist", "ok"),
         ]
@@ -953,7 +974,7 @@ with body:
     elif active == "Notifications":
         html("""<div class="eyebrow">YOUR SMARTFIND INBOX</div>
         <div class="page-title">Notifications</div>
-        <div class="page-sub">Strong possible matches for reports you submitted. These are in-app notices; no email is sent.</div>""")
+        <div class="page-sub">Strong possible matches for your reports. Inbox notices always appear here; email delivery status is shown on each notice.</div>""")
         notifications = load_notifications(current_user["email"])
         unread_count = sum(notification["read_at"] is None for notification in notifications)
         header_left, header_right = st.columns([3, 1])
@@ -966,11 +987,20 @@ with body:
         for notification in notifications:
             with st.container(key=f"card_notification_{notification['id']}"):
                 state_label = "Unread" if notification["read_at"] is None else "Read"
+                email_status = notification.get("email_status", "pending")
+                if email_status == "sent":
+                    email_label = "Email sent"
+                elif email_status == "failed":
+                    email_label = "Email failed"
+                elif email_status == "sending":
+                    email_label = "Email sending"
+                else:
+                    email_label = "Email queued" if is_configured(mail_config) else "Email not configured"
                 html(f"""<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
                 <div><strong>Possible match for {esc(notification['item'])}</strong>
-                <div style="font-size:12px;color:#718096;margin-top:4px">Similarity {notification['score']}/100 · {esc(notification['time'])} · {state_label}</div></div>
+                <div style="font-size:12px;color:#718096;margin-top:4px">Similarity {notification['score']}/100 · {esc(notification['time'])} · {state_label} · {email_label}</div></div>
                 <span class="pill pill-open">{state_label}</span></div>""")
-                button_cols = st.columns([1, 1, 4])
+                button_cols = st.columns([1, 1, 1, 3])
                 if notification["read_at"] is None and button_cols[0].button(
                         "Mark read", key=f"notif_read_{notification['id']}"):
                     mark_notification_read(notification["id"], current_user["email"],
@@ -978,6 +1008,13 @@ with body:
                     st.rerun()
                 if button_cols[1].button("View matches", key=f"notif_matches_{notification['id']}"):
                     navigate("Possible Matches")
+                if email_status == "failed" and is_configured(mail_config) and button_cols[2].button(
+                        "Retry email", key=f"notif_retry_{notification['id']}"):
+                    if retry_notification_email(notification["id"], current_user["email"]):
+                        auto_monitor_and_notify()
+                    st.rerun()
+                if email_status == "failed":
+                    st.caption("Email delivery failed. You can still review the possible match in SmartFind.")
             st.write("")
 
     # ========================================================

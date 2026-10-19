@@ -30,9 +30,23 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
 [smartfind]
 student_email_domains = ["tip.edu.ph"]
 admin_emails = ["your-admin-account@tip.edu.ph"]
+
+[mail]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+smtp_username = "your-sender@gmail.com"
+smtp_password = "your-google-app-password"
+from_email = "your-sender@gmail.com"
+app_url = "https://<your-app-subdomain>.streamlit.app"
 ```
 
 For the hosted app, set `redirect_uri` to `https://<your-app-subdomain>.streamlit.app/oauth2callback` and add that exact callback URL to the Google OAuth client's authorized redirect URIs. Add every authorized admin's exact email to `admin_emails`. If your campus uses another identity provider/domain, configure its OIDC metadata URL and email domain instead. Until these secrets are present, the app intentionally blocks access.
+
+### Gmail notifications
+
+Email is optional. To send match alerts from Gmail, configure the `[mail]` section above in Streamlit Cloud **Secrets** (or local `.streamlit/secrets.toml`). Use a Google **App Password**, not your normal Gmail password. App Passwords require 2-Step Verification and may be disabled by a Google Workspace administrator. In Google Account settings, create an App Password for SmartFind and place it in `smtp_password`; never commit or share it. The sender uses Gmail SMTP with STARTTLS on port `587`.
+
+Each strong match produces an inbox item for both report owners. When SMTP is configured, pending messages are sent once and their status is saved as sent/failed. Failed messages can be retried from that owner's Notifications page. If mail is not configured, the in-app notice still works and the email status says `Email not configured`. Older inbox notices from before email support are marked legacy and are not sent retroactively.
 
 ### OCR setup
 
@@ -50,7 +64,7 @@ Set `SMARTFIND_DB_PATH` to a writable persistent SQLite path when deploying. Str
 2. If YOLO detects an item, the detected crop is analyzed. If it returns no box, SmartFind still runs OCR on the full photo and estimates color from its center region; the category must then be selected manually.
 3. RapidOCR reads text and matches it to canonical brand labels, including configured legal-name aliases. The brand form is a category-specific list with OCR candidates, an Unknown choice, and a manual Other option. Color is a rough pixel estimate.
 4. Confirmed category, color, canonical brand, date, location, description, owner identity, and photo thumbnail are saved in SQLite.
-5. The matching agent compares open Lost and Found reports. Brand shares the existing 10-point description allocation when either report supplies a brand (5 points each); otherwise legacy scoring is unchanged. Strong possible matches create persistent, per-owner inbox notifications; each owner can mark them read. No email is sent. Scores are rule-based similarity, not probabilities or proof of ownership.
+5. The matching agent compares open Lost and Found reports. Brand shares the existing 10-point description allocation when either report supplies a brand (5 points each); otherwise legacy scoring is unchanged. Strong possible matches create persistent, per-owner inbox notifications; each owner can mark them read. When SMTP is configured, one email is sent to each owner. Scores are rule-based similarity, not probabilities or proof of ownership.
 
 YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The trained model's embedded class names are used to populate the category choices. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds; in no-detection fallback it samples the image center. OCR may miss stylized text and does not recognize logo graphics. With no detected category, OCR checks the whole photo against the combined brand shortlist, which may increase false positives; the user must confirm any suggested brand.
 
@@ -58,6 +72,6 @@ YOLO category detection is not instance-level image matching: two objects of the
 
 - Reports are stored in `data/smartfind.db`; demo records seed the database only on its first empty launch.
 - Run the pure-logic and storage/vision tests with `python -m unittest -v`.
-- Notifications are persistent in-app inbox records; no email is sent.
+- Notifications persist in each owner's inbox; SMTP email requires Gmail credentials in Streamlit Secrets.
 - Use authentic photos from the supported classes to evaluate model accuracy and tune the confidence threshold before operational use.
 - Public production use still needs reviewed privacy/retention policies, durable managed storage, backups, and an operational admin process. OIDC identity and role checks are implemented, but must be configured correctly before opening access.

@@ -29,8 +29,23 @@ def _connect():
             item TEXT NOT NULL,
             score INTEGER NOT NULL,
             created_at TEXT NOT NULL,
-            read_at TEXT
+            read_at TEXT,
+            email_status TEXT NOT NULL DEFAULT 'pending',
+            email_sent_at TEXT,
+            email_error TEXT
         )""")
+        notification_columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(notifications)").fetchall()}
+        if "email_status" not in notification_columns:
+            connection.execute("""ALTER TABLE notifications ADD COLUMN email_status
+                TEXT NOT NULL DEFAULT 'legacy'""")
+            connection.execute("UPDATE notifications SET email_status = 'legacy'")
+            notification_columns.add("email_status")
+        for column, definition in (
+                ("email_sent_at", "TEXT"),
+                ("email_error", "TEXT")):
+            if column not in notification_columns:
+                connection.execute(f"ALTER TABLE notifications ADD COLUMN {column} {definition}")
         yield connection
         connection.commit()
     except Exception:
@@ -89,15 +104,49 @@ def save_notifications(notifications):
 
 def load_notifications(recipient, unread_only=False):
     query = """SELECT id, key, pair_key, recipient, item, score, created_at, read_at
-        FROM notifications WHERE recipient = ?"""
+        , email_status, email_sent_at, email_error FROM notifications WHERE recipient = ?"""
     params = [str(recipient).strip().casefold()]
     if unread_only:
         query += " AND read_at IS NULL"
     query += " ORDER BY id DESC"
     with _connect() as connection:
         rows = connection.execute(query, params).fetchall()
-    columns = ("id", "key", "pair_key", "recipient", "item", "score", "time", "read_at")
+    columns = ("id", "key", "pair_key", "recipient", "item", "score", "time", "read_at",
+               "email_status", "email_sent_at", "email_error")
     return [dict(zip(columns, row)) for row in rows]
+
+
+def pending_notification_emails():
+    with _connect() as connection:
+        rows = connection.execute("""SELECT id, key, pair_key, recipient, item, score, created_at
+            FROM notifications WHERE email_status = 'pending' ORDER BY id""").fetchall()
+    columns = ("id", "key", "pair_key", "recipient", "item", "score", "time")
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def claim_notification_email(notification_id):
+    """Atomically claim a pending message so concurrent sessions cannot send twice."""
+    with _connect() as connection:
+        cursor = connection.execute("""UPDATE notifications SET email_status = 'sending', email_error = NULL
+            WHERE id = ? AND email_status = 'pending'""", (notification_id,))
+        return cursor.rowcount == 1
+
+
+def finish_notification_email(notification_id, status, timestamp=None, error=None):
+    if status not in {"sent", "failed"}:
+        raise ValueError("Email status must be 'sent' or 'failed'.")
+    with _connect() as connection:
+        connection.execute("""UPDATE notifications SET email_status = ?, email_sent_at = ?, email_error = ?
+            WHERE id = ?""", (status, timestamp if status == "sent" else None,
+                                str(error)[:500] if error else None, notification_id))
+
+
+def retry_notification_email(notification_id, recipient):
+    with _connect() as connection:
+        cursor = connection.execute("""UPDATE notifications SET email_status = 'pending', email_error = NULL
+            WHERE id = ? AND recipient = ? AND email_status = 'failed'""",
+                                    (notification_id, str(recipient).strip().casefold()))
+        return cursor.rowcount == 1
 
 
 def mark_notification_read(notification_id, recipient, timestamp):
