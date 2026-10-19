@@ -332,14 +332,12 @@ class EmailDeliveryTests(unittest.TestCase):
             "smtp_password": "app-password"}))
 
     def test_email_uses_report_owner_and_match_details(self):
-        context = MagicMock()
         server = MagicMock()
-        context.__enter__.return_value = server
         notification = {"recipient": "owner@example.com", "item": "Black phone", "score": 86}
         settings = {"smtp_host": "smtp.gmail.com", "smtp_port": 587,
                     "smtp_username": "sender@gmail.com", "smtp_password": "app pass word",
                     "app_url": "https://smartfind.streamlit.app"}
-        with patch("smartfind_mail.smtplib.SMTP", return_value=context) as smtp:
+        with patch("smartfind_mail.smtplib.SMTP", return_value=server) as smtp:
             smartfind_mail.send_match_email(notification, settings)
         smtp.assert_called_once_with("smtp.gmail.com", 587, timeout=20)
         server.login.assert_called_once_with("sender@gmail.com", "apppassword")
@@ -347,6 +345,15 @@ class EmailDeliveryTests(unittest.TestCase):
         self.assertEqual(message["To"], "owner@example.com")
         self.assertIn("86/100", message.get_content())
         self.assertIn("https://smartfind.streamlit.app", message.get_content())
+
+    def test_smtp_probe_reports_the_stage_that_failed(self):
+        server = MagicMock()
+        server.starttls.side_effect = ConnectionError("TLS blocked")
+        settings = {"smtp_host": "smtp.gmail.com", "smtp_port": 587,
+                    "smtp_username": "sender@gmail.com", "smtp_password": "app-password"}
+        with patch("smartfind_mail.smtplib.SMTP", return_value=server):
+            with self.assertRaisesRegex(smartfind_mail.SMTPDeliveryError, "STARTTLS: ConnectionError"):
+                smartfind_mail.test_smtp_connection(settings)
 
     def test_failed_delivery_can_be_retried_once(self):
         old_path = smartfind_store.DB_PATH

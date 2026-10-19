@@ -33,7 +33,7 @@ from smartfind_store import (delete_report, load_notifications, load_reports,
                              claim_notification_email, finish_notification_email,
                              retry_notification_email, save_notifications, save_report,
                              seed_reports_if_empty)
-from smartfind_mail import is_configured, send_match_email
+from smartfind_mail import SMTPDeliveryError, is_configured, send_match_email, test_smtp_connection
 
 st.set_page_config(page_title="SmartFind - Campus Lost & Found", page_icon="🔎",
                    layout="wide", initial_sidebar_state="auto")
@@ -1037,6 +1037,14 @@ with body:
 
         html("""<div class="notif-bar"><strong>Administrator access.</strong> This page is available only to
         verified accounts listed in the app's admin email allowlist.</div>""")
+
+        if is_configured(mail_config) and st.button("Test Gmail connection", key="test_gmail_smtp"):
+            try:
+                test_smtp_connection(mail_config)
+            except SMTPDeliveryError as exc:
+                st.error(f"SMTP connection test failed: {esc(exc)}")
+            else:
+                st.success("Gmail SMTP connection and login succeeded. No email was sent.")
 
         reps = st.session_state.reports
         stats = [("ⓘ", "Total Lost Reports", sum(r["type"] == "Lost" for r in reps)),
