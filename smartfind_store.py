@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 DB_PATH = Path(os.environ.get("SMARTFIND_DB_PATH", Path(__file__).parent / "data" / "smartfind.db"))
 
@@ -31,6 +32,7 @@ def _connect():
             created_at TEXT NOT NULL,
             read_at TEXT,
             email_status TEXT NOT NULL DEFAULT 'pending',
+            email_attempted_at TEXT,
             email_sent_at TEXT,
             email_error TEXT
         )""")
@@ -42,6 +44,7 @@ def _connect():
             connection.execute("UPDATE notifications SET email_status = 'legacy'")
             notification_columns.add("email_status")
         for column, definition in (
+            ("email_attempted_at", "TEXT"),
                 ("email_sent_at", "TEXT"),
                 ("email_error", "TEXT")):
             if column not in notification_columns:
@@ -104,7 +107,8 @@ def save_notifications(notifications):
 
 def load_notifications(recipient, unread_only=False):
     query = """SELECT id, key, pair_key, recipient, item, score, created_at, read_at
-        , email_status, email_sent_at, email_error FROM notifications WHERE recipient = ?"""
+        , email_status, email_attempted_at, email_sent_at, email_error
+        FROM notifications WHERE recipient = ?"""
     params = [str(recipient).strip().casefold()]
     if unread_only:
         query += " AND read_at IS NULL"
@@ -112,7 +116,7 @@ def load_notifications(recipient, unread_only=False):
     with _connect() as connection:
         rows = connection.execute(query, params).fetchall()
     columns = ("id", "key", "pair_key", "recipient", "item", "score", "time", "read_at",
-               "email_status", "email_sent_at", "email_error")
+               "email_status", "email_attempted_at", "email_sent_at", "email_error")
     return [dict(zip(columns, row)) for row in rows]
 
 
@@ -126,10 +130,23 @@ def pending_notification_emails():
 
 def claim_notification_email(notification_id):
     """Atomically claim a pending message so concurrent sessions cannot send twice."""
+    attempted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _connect() as connection:
-        cursor = connection.execute("""UPDATE notifications SET email_status = 'sending', email_error = NULL
-            WHERE id = ? AND email_status = 'pending'""", (notification_id,))
+        cursor = connection.execute("""UPDATE notifications SET email_status = 'sending',
+            email_attempted_at = ?, email_error = NULL
+            WHERE id = ? AND email_status = 'pending'""", (attempted_at, notification_id))
         return cursor.rowcount == 1
+
+
+def fail_stuck_notification_emails(stale_after_seconds=120):
+    """Turn abandoned SMTP claims into failed entries after the send timeout window."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat(timespec="seconds")
+    with _connect() as connection:
+        cursor = connection.execute("""UPDATE notifications SET email_status = 'failed',
+            email_error = 'SMTP attempt did not finish; check the inbox before retrying.'
+            WHERE email_status = 'sending'
+            AND (email_attempted_at IS NULL OR email_attempted_at < ?)""", (cutoff,))
+        return cursor.rowcount
 
 
 def finish_notification_email(notification_id, status, timestamp=None, error=None):
@@ -144,7 +161,7 @@ def finish_notification_email(notification_id, status, timestamp=None, error=Non
 def retry_notification_email(notification_id, recipient):
     with _connect() as connection:
         cursor = connection.execute("""UPDATE notifications SET email_status = 'pending', email_error = NULL
-            WHERE id = ? AND recipient = ? AND email_status = 'failed'""",
+            , email_attempted_at = NULL WHERE id = ? AND recipient = ? AND email_status = 'failed'""",
                                     (notification_id, str(recipient).strip().casefold()))
         return cursor.rowcount == 1
 

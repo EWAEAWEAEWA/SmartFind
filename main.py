@@ -27,7 +27,8 @@ from smartfind_auth import resolve_role
 from smartfind_vision import (brands_for_category, classify_image, get_model_categories,
                               normalize_brand)
 from smartfind_store import (delete_report, load_notifications, load_reports,
-                             mark_all_notifications_read, mark_notification_read,
+                             fail_stuck_notification_emails, mark_all_notifications_read,
+                             mark_notification_read,
                              notification_keys, pending_notification_emails,
                              claim_notification_email, finish_notification_email,
                              retry_notification_email, save_notifications, save_report,
@@ -263,6 +264,7 @@ st.session_state.id_counter = max(
 
 def auto_monitor_and_notify():
     """Persist owner inbox entries and deliver any queued email once."""
+    fail_stuck_notification_emails()
     notifications = new_notifications(
         st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
     save_notifications(notifications)
@@ -1014,7 +1016,10 @@ with body:
                         auto_monitor_and_notify()
                     st.rerun()
                 if email_status == "failed":
-                    st.caption("Email delivery failed. You can still review the possible match in SmartFind.")
+                    if "check the inbox before retrying" in str(notification.get("email_error", "")).casefold():
+                        st.warning("The previous send was interrupted. Check your inbox and spam folder before retrying to avoid a duplicate email.")
+                    else:
+                        st.caption("Email delivery failed. You can still review the possible match in SmartFind.")
             st.write("")
 
     # ========================================================

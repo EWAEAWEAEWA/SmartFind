@@ -368,6 +368,24 @@ class EmailDeliveryTests(unittest.TestCase):
         finally:
             smartfind_store.DB_PATH = old_path
 
+    def test_abandoned_sending_state_recovers_to_failed(self):
+        old_path = smartfind_store.DB_PATH
+        try:
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "stuck.db"
+                entry = {"key": "p_owner@example.com", "pair_key": "p",
+                         "recipient": "owner@example.com", "item": "Phone", "score": 90, "time": "now"}
+                smartfind_store.save_notifications([entry])
+                notification = smartfind_store.pending_notification_emails()[0]
+                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
+                self.assertEqual(smartfind_store.fail_stuck_notification_emails(stale_after_seconds=-1), 1)
+                saved = smartfind_store.load_notifications("owner@example.com")[0]
+                self.assertEqual(saved["email_status"], "failed")
+                self.assertIn("check the inbox", saved["email_error"])
+                self.assertEqual(smartfind_store.pending_notification_emails(), [])
+        finally:
+            smartfind_store.DB_PATH = old_path
+
 
 if __name__ == "__main__":
     unittest.main()

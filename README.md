@@ -46,7 +46,7 @@ For the hosted app, set `redirect_uri` to `https://<your-app-subdomain>.streamli
 
 Email is optional. To send match alerts from Gmail, configure the `[mail]` section above in Streamlit Cloud **Secrets** (or local `.streamlit/secrets.toml`). Use a Google **App Password**, not your normal Gmail password. App Passwords require 2-Step Verification and may be disabled by a Google Workspace administrator. In Google Account settings, create an App Password for SmartFind and place it in `smtp_password`; never commit or share it. The sender uses Gmail SMTP with STARTTLS on port `587`.
 
-Each strong match produces an inbox item for both report owners. When SMTP is configured, pending messages are sent once and their status is saved as sent/failed. Failed messages can be retried from that owner's Notifications page. If mail is not configured, the in-app notice still works and the email status says `Email not configured`. Older inbox notices from before email support are marked legacy and are not sent retroactively.
+Each strong match produces an inbox item for both report owners. When SMTP is configured, pending messages are sent once and their status is saved as sent/failed. If a process stops mid-send, an attempt left in `sending` for more than two minutes is marked failed on the next app run. Check inbox/spam before retrying an interrupted attempt because Gmail may already have accepted it. Other failed messages can be retried from that owner's Notifications page. If mail is not configured, the in-app notice still works and the email status says `Email not configured`. Older inbox notices from before email support are marked legacy and are not sent retroactively.
 
 ### OCR setup
 
