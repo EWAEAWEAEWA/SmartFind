@@ -1020,6 +1020,12 @@ with body:
                         st.warning("The previous send was interrupted. Check your inbox and spam folder before retrying to avoid a duplicate email.")
                     else:
                         st.caption("Email delivery failed. You can still review the possible match in SmartFind.")
+                    if notification.get("email_error") and "check the inbox before retrying" not in str(
+                            notification["email_error"]).casefold():
+                        st.caption(f"SMTP diagnostic: {esc(notification['email_error'])}")
+                elif email_status == "sending" and button_cols[2].button(
+                        "Refresh status", key=f"notif_refresh_{notification['id']}"):
+                    st.rerun()
             st.write("")
 
     # ========================================================
