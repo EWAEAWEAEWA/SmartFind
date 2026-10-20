@@ -11,7 +11,7 @@ python -m pip install -r requirements.txt
 streamlit run main.py
 ```
 
-Open the local URL printed by Streamlit (normally `http://localhost:8501`) in a browser. Keep `models/best.pt` at its current path, or set `SMARTFIND_MODEL_PATH` to another model file. `SMARTFIND_DETECTION_CONFIDENCE` optionally changes the detector threshold (default `0.40`; tune against representative campus photos).
+Open the local URL printed by Streamlit (normally `http://localhost:8501`) in a browser. Keep both `models/best.pt` (V1, loaded with Ultralytics) and `models/best_v2.pt` (V2, the YOLOv5 checkpoint loaded with the `yolov5` runtime) in place. Each signed-in user can select their detector in the sidebar; the choice is private to that Streamlit session and does not affect other users. Set `SMARTFIND_MODEL_PATH` or `SMARTFIND_MODEL_V2_PATH` to override either checkpoint. `SMARTFIND_DETECTION_CONFIDENCE` optionally changes the detector threshold for both (default `0.40`; tune against representative campus photos).
 
 ## Sign-in and roles
 
@@ -71,7 +71,7 @@ The app uses RapidOCR with ONNX Runtime as its primary OCR engine; install it wi
 
 ## Browser deployment
 
-The included `Dockerfile` builds a browser-accessible container. Build and run it with Docker, publishing port `8501`. For Streamlit Community Cloud, deploy `main.py`, retain `models/best.pt` in the repository, and configure the Supabase secret.
+The included `Dockerfile` builds a browser-accessible container. Build and run it with Docker, publishing port `8501`. For Streamlit Community Cloud, deploy `main.py`, retain both `models/best.pt` and `models/best_v2.pt` in the repository, and configure the Supabase secret.
 
 ## How suggestions and matches work
 
@@ -81,7 +81,7 @@ The included `Dockerfile` builds a browser-accessible container. Build and run i
 4. Confirmed category, color, canonical brand, date, location, description, owner identity, and photo thumbnail are saved in Supabase PostgreSQL.
 5. The matching agent compares open Lost and Found reports. Location matching recognizes matching room codes or campus areas inside longer text, plus exact shared keywords and conservative close keyword spellings for partial points. Brand shares the existing 10-point description allocation when either report supplies a brand (5 points each); otherwise legacy scoring is unchanged. Strong possible matches create persistent, per-owner inbox notifications; each owner can mark them read. When SMTP is configured, one email is sent to each owner. Scores are rule-based similarity, not probabilities or proof of ownership.
 
-YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The trained model's embedded class names are used to populate the category choices. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds; in no-detection fallback it samples the image center. OCR may miss stylized text and does not recognize logo graphics. With no detected category, OCR checks the whole photo against the combined brand shortlist, which may increase false positives; the user must confirm any suggested brand.
+YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The V1 and V2 checkpoints are selected per signed-in Streamlit session. Their labels are normalized into one shared category vocabulary (for example, `Smartphone` and `Mobile phone` both become `Mobile phone`) so reports from different model versions can still match. Category choices include the combined 24 labels; a given model can only detect classes it was trained to recognize. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds; in no-detection fallback it samples the image center. OCR may miss stylized text and does not recognize logo graphics. With no detected category, OCR checks the whole photo against the combined brand shortlist, which may increase false positives; the user must confirm any suggested brand.
 
 ## Data, tests, and current limitations
 

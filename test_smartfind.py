@@ -1,5 +1,6 @@
 """Run with:  python -m unittest -v      (no Streamlit needed)"""
 import unittest
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -198,10 +199,157 @@ class MatchingRefinementTests(unittest.TestCase):
 class VisionScopeTests(unittest.TestCase):
     """Real model metadata and image-analysis helpers are used; OCR stays optional."""
 
+    @unittest.skipUnless(importlib.util.find_spec("ultralytics"), "ultralytics is not installed")
     def test_trained_model_and_embedded_categories_are_available(self):
         self.assertTrue(smartfind_vision.MODEL_PATH.is_file())
         self.assertEqual(smartfind_vision.RECOGNIZER_MODE, "model")
         self.assertTrue(smartfind_vision.get_model_categories())
+
+    def test_both_model_versions_have_checkpoints_and_labels(self):
+        self.assertEqual(set(smartfind_vision.MODEL_PATHS), {"v1", "v2"})
+        self.assertEqual(set(smartfind_vision.MODEL_LABELS), {"v1", "v2"})
+        self.assertTrue(smartfind_vision.MODEL_PATHS["v1"].is_file())
+        self.assertTrue(smartfind_vision.MODEL_PATHS["v2"].is_file())
+        self.assertEqual(len(smartfind_vision.TRAINED_CATEGORIES), 24)
+
+    def test_model_loader_uses_the_selected_checkpoint(self):
+        created = []
+
+        class FakeYOLO:
+            def __init__(self, path):
+                self.path = path
+                created.append(path)
+
+        def load_yolov5(path, device):
+            model = FakeYOLO(path)
+            model.device = device
+            return model
+
+        smartfind_vision._load_model.cache_clear()
+        try:
+            with patch.dict(sys.modules, {
+                "ultralytics": types.SimpleNamespace(YOLO=FakeYOLO),
+                "yolov5": types.SimpleNamespace(load=load_yolov5),
+            }):
+                first = smartfind_vision._load_model("v1")
+                second = smartfind_vision._load_model("v2")
+            self.assertEqual(first.path, str(smartfind_vision.MODEL_PATHS["v1"]))
+            self.assertEqual(second.path, str(smartfind_vision.MODEL_PATHS["v2"]))
+            self.assertEqual(second.device, "cpu")
+            self.assertEqual(second.conf, smartfind_vision.CONFIDENCE_THRESHOLD)
+            self.assertEqual(len(created), 2)
+        finally:
+            smartfind_vision._load_model.cache_clear()
+
+    def test_v1_detector_normalizes_its_label_and_uses_selected_model(self):
+        from PIL import Image
+        from io import BytesIO
+
+        class Value:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+            def tolist(self):
+                return self.value
+
+            def argmax(self):
+                return Value(0)
+
+        class Box:
+            cls = Value(0)
+            conf = Value(0.91)
+            xyxy = [Value([2, 2, 28, 28])]
+
+        class Boxes:
+            conf = Value(0)
+
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, index):
+                self.asserted_index = index
+                return Box()
+
+        model = types.SimpleNamespace(
+            names={0: "Smartphone"},
+            predict=lambda **_kwargs: [types.SimpleNamespace(boxes=Boxes())],
+        )
+        image = Image.new("RGB", (32, 32), "blue")
+        stream = BytesIO()
+        image.save(stream, format="PNG")
+        with patch.object(smartfind_vision, "_load_model", return_value=model) as load_model, \
+                patch.object(smartfind_vision, "read_text_candidates", return_value=([], [])):
+            result = smartfind_vision.classify_image(stream.getvalue(), model_version="v1")
+        load_model.assert_called_once_with("v1")
+        self.assertEqual(result["category"], "Mobile phone")
+        self.assertEqual(result["source"], "model")
+
+    def test_v2_detector_reads_yolov5_predictions_and_normalizes_label(self):
+        from PIL import Image
+        from io import BytesIO
+
+        class Tensor:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+            def tolist(self):
+                return self.value
+
+            def argmax(self):
+                return Tensor(0)
+
+        class Detection:
+            def __getitem__(self, key):
+                values = [2, 2, 28, 28, 0.91, 0]
+                return Tensor(values[key])
+
+        class Detections:
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, key):
+                return Tensor(0) if isinstance(key, tuple) else Detection()
+
+        class Predictions:
+            pred = [Detections()]
+
+        class FakeYoloV5Model:
+            names = {0: "Smartphone"}
+
+            def __call__(self, *_args, **_kwargs):
+                return Predictions()
+
+        model = FakeYoloV5Model()
+        image = Image.new("RGB", (32, 32), "blue")
+        stream = BytesIO()
+        image.save(stream, format="PNG")
+        with patch.object(smartfind_vision, "_load_model", return_value=model) as load_model, \
+                patch.object(smartfind_vision, "read_text_candidates", return_value=([], [])):
+            result = smartfind_vision.classify_image(stream.getvalue(), model_version="v2")
+        load_model.assert_called_once_with("v2")
+        self.assertEqual(result["category"], "Mobile phone")
+        self.assertEqual(result["confidence"], 91)
+
+    def test_category_labels_are_normalized_across_models_and_manual_input(self):
+        aliases = {
+            "Smartphone": "Mobile phone",
+            "mobile-phone": "Mobile phone",
+            "ID Card": "StudentID_card",
+            "studentid card": "StudentID_card",
+            "Eyeglasses": "Glasses",
+            "Water Bottle": "Water bottle",
+            "powerbank": "Power bank",
+            "iPad Air": "iPad-Air",
+        }
+        for source, canonical in aliases.items():
+            with self.subTest(source=source):
+                self.assertEqual(smartfind_vision.normalize_category(source), canonical)
 
     def test_color_estimator_returns_named_color(self):
         from PIL import Image
@@ -344,6 +492,12 @@ class MobileNavigationTests(unittest.TestCase):
         self.assertIn('navigate(name)', source)
         self.assertIn(".st-key-mobile_nav", mobile_css)
         self.assertIn("min-width:44px", mobile_css)
+
+    def test_each_session_selects_and_passes_its_own_detector(self):
+        source = Path("main.py").read_text(encoding="utf-8")
+        self.assertIn('key="vision_model"', source)
+        self.assertIn("analyze_photo(photo_bytes, st.session_state.vision_model)", source)
+        self.assertIn("This choice only changes photo analysis in your signed-in session.", source)
 
 
 class EmailDeliveryTests(unittest.TestCase):

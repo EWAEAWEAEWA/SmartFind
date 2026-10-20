@@ -11,10 +11,50 @@ import io
 import os
 import re
 
-MODEL_PATH = Path(os.environ.get("SMARTFIND_MODEL_PATH", Path(__file__).parent / "models" / "best.pt"))
+_MODEL_DIRECTORY = Path(__file__).parent / "models"
+MODEL_PATHS = {
+    "v1": Path(os.environ.get("SMARTFIND_MODEL_PATH", _MODEL_DIRECTORY / "best.pt")),
+    "v2": Path(os.environ.get("SMARTFIND_MODEL_V2_PATH", _MODEL_DIRECTORY / "best_v2.pt")),
+}
+MODEL_LABELS = {"v1": "V1 (original best.pt)", "v2": "V2 (friend-trained best (1).pt)"}
+MODEL_PATH = MODEL_PATHS["v1"]
 CONFIDENCE_THRESHOLD = float(os.environ.get("SMARTFIND_DETECTION_CONFIDENCE", "0.40"))
 RECOGNIZER_MODE = "model" if MODEL_PATH.is_file() else "unavailable"
 AI_CATEGORIES = {}
+
+TRAINED_CATEGORIES = [
+    "Apple-Pencil", "Bag", "Calculator", "Charging-cable",
+    "Earphones", "Glasses", "Keyboard", "Keys", "Laptop",
+    "Lecture-notes", "Markers", "Mobile phone", "Mouse", "PC",
+    "Pen", "Screen", "StudentID_card", "Wallet", "Watch",
+    "Water bottle", "iPad-Air", "iPad-Pro", "Power bank", "Tumbler",
+]
+
+_CATEGORY_ALIASES = {
+    "smartphone": "Mobile phone",
+    "phone": "Mobile phone",
+    "id card": "StudentID_card",
+    "idcard": "StudentID_card",
+    "studentidcard": "StudentID_card",
+    "eyeglasses": "Glasses",
+    "waterbottle": "Water bottle",
+    "chargingcable": "Charging-cable",
+    "applepencil": "Apple-Pencil",
+    "lecturenotes": "Lecture-notes",
+    "ipad air": "iPad-Air",
+    "ipadair": "iPad-Air",
+    "ipad pro": "iPad-Pro",
+    "ipadpro": "iPad-Pro",
+    "powerbank": "Power bank",
+}
+_CATEGORY_CANONICAL = {
+    re.sub(r"[^a-z0-9]", "", category.casefold()): category
+    for category in TRAINED_CATEGORIES
+}
+_CATEGORY_CANONICAL.update({
+    re.sub(r"[^a-z0-9]", "", alias.casefold()): canonical
+    for alias, canonical in _CATEGORY_ALIASES.items()
+})
 
 _COLOR_PROTOTYPES = {
     "Black": (25, 25, 25), "White": (235, 235, 235), "Gray": (128, 128, 128),
@@ -78,18 +118,18 @@ for _canonical_brand, _aliases in _BRAND_ALIASES.items():
         _BRAND_LOOKUP[re.sub(r"[^a-z0-9]", "", _brand_alias.casefold())] = _canonical_brand
 
 
-_CATEGORY_ALIASES = {
-    "smartphone": "Mobile phone",
-    "id card": "StudentID_card",
-    "eyeglasses": "Glasses",
-    "water bottle": "Water bottle",
-}
+def normalize_category(value):
+    """Map equivalent model/manual labels to one category used by reports and matching."""
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    key = re.sub(r"[^a-z0-9]", "", text.casefold())
+    return _CATEGORY_CANONICAL.get(key, text)
 
 
 def brands_for_category(category):
     """Return the curated list for a model category or its manual-form alias."""
-    category = str(category or "").strip()
-    category = _CATEGORY_ALIASES.get(category.casefold(), category)
+    category = normalize_category(category)
     return list(BRANDS_BY_CATEGORY.get(category, []))
 
 
@@ -100,35 +140,51 @@ def normalize_brand(value):
     return _BRAND_LOOKUP.get(key, text)
 
 
-@lru_cache(maxsize=1)
-def _load_model():
-    if not MODEL_PATH.is_file():
-        raise FileNotFoundError(f"YOLO model was not found: {MODEL_PATH}")
+@lru_cache(maxsize=2)
+def _load_model(model_version="v1"):
+    if model_version not in MODEL_PATHS:
+        raise ValueError(f"Unknown YOLO model version: {model_version}")
+    model_path = MODEL_PATHS[model_version]
+    if not model_path.is_file():
+        raise FileNotFoundError(f"YOLO model {model_version.upper()} was not found: {model_path}")
     try:
+        if model_version == "v2":
+            from yolov5 import load
+            model = load(str(model_path), device="cpu")
+            model.conf = CONFIDENCE_THRESHOLD
+            return model
         from ultralytics import YOLO
+        return YOLO(str(model_path))
     except ImportError as exc:
         missing = f"{exc.name}: {exc}" if getattr(exc, "name", None) else str(exc)
+        package = "yolov5" if model_version == "v2" else "ultralytics"
         raise RuntimeError(
-            f"YOLO could not import a required package ({missing}). "
-            "Check the deployment build logs and CPU PyTorch requirements."
+            f"YOLO model {model_version.upper()} needs the {package} runtime "
+            f"({missing}). Check the deployment build logs."
         ) from exc
-    return YOLO(str(MODEL_PATH))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not load YOLO model {model_version.upper()} from {model_path}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
-def get_model_categories():
+def get_model_categories(model_version="v1"):
     """Return class names embedded in the trained model, or an empty list if unavailable."""
     try:
-        names = _load_model().names
+        names = _load_model(model_version).names
     except Exception:
         # Metadata should not prevent the app from starting if model loading fails;
         # image analysis reports the actionable error when a photo is submitted.
         return []
     if isinstance(names, dict):
-        return [str(names[k]) for k in sorted(names)]
-    return [str(name) for name in names]
+        categories = [normalize_category(names[k]) for k in sorted(names)]
+    else:
+        categories = [normalize_category(name) for name in names]
+    return list(dict.fromkeys(categories))
 
 
-def classify_image(image_bytes, filename="uploaded-image"):
+def classify_image(image_bytes, filename="uploaded-image", model_version="v1"):
     """Detect the most confident item and analyze its crop.
 
     Returns category, confidence (percent), color suggestion, OCR text candidate,
@@ -143,19 +199,38 @@ def classify_image(image_bytes, filename="uploaded-image"):
     except Exception as exc:
         raise ValueError("The uploaded file is not a readable image.") from exc
 
-    model = _load_model()
-    results = model.predict(source=image, conf=CONFIDENCE_THRESHOLD, verbose=False)
-    boxes = results[0].boxes
-    if boxes is None or len(boxes) == 0:
-        return _fallback_image_analysis(image, "No supported object detected; analyzed the full photo instead")
+    model = _load_model(model_version)
+    try:
+        if model_version == "v2":
+            detections = model(image, size=640).pred[0]
+            if len(detections) == 0:
+                return _fallback_image_analysis(
+                    image, "No supported object detected; analyzed the full photo instead")
+            best_i = int(detections[:, 4].argmax().item())
+            detection = detections[best_i]
+            class_id = int(detection[5].item())
+            confidence = float(detection[4].item()) * 100
+            coordinates = detection[:4].tolist()
+        else:
+            results = model.predict(source=image, conf=CONFIDENCE_THRESHOLD, verbose=False)
+            boxes = results[0].boxes
+            if boxes is None or len(boxes) == 0:
+                return _fallback_image_analysis(
+                    image, "No supported object detected; analyzed the full photo instead")
+            best_i = int(boxes.conf.argmax().item())
+            box = boxes[best_i]
+            class_id = int(box.cls.item())
+            confidence = float(box.conf.item()) * 100
+            coordinates = box.xyxy[0].tolist()
+    except Exception as exc:
+        raise RuntimeError(
+            f"YOLO model {model_version.upper()} failed to analyze the image: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
-    best_i = int(boxes.conf.argmax().item())
-    box = boxes[best_i]
-    class_id = int(box.cls.item())
     names = model.names
-    category = str(names[class_id] if isinstance(names, dict) else names[class_id])
-    confidence = float(box.conf.item()) * 100
-    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+    category = normalize_category(names[class_id] if isinstance(names, dict) else names[class_id])
+    x1, y1, x2, y2 = [int(v) for v in coordinates]
     x1, x2 = max(0, x1), min(image.width, x2)
     y1, y2 = max(0, y1), min(image.height, y2)
     crop = image.crop((x1, y1, x2, y2))

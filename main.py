@@ -24,8 +24,9 @@ import streamlit as st
 from smartfind_core import (MATCH_THRESHOLD, NOTIFY_THRESHOLD, calculate_match_score,  # noqa: F401
                             find_pairs, new_notifications)
 from smartfind_auth import resolve_role
-from smartfind_vision import (brands_for_category, classify_image, get_model_categories,
-                              normalize_brand)
+from smartfind_vision import (MODEL_LABELS, MODEL_PATHS, TRAINED_CATEGORIES,
+                              brands_for_category, classify_image, normalize_brand,
+                              normalize_category)
 from smartfind_store import (delete_report, load_notifications, load_reports,
                              fail_stuck_notification_emails, mark_all_notifications_read,
                              mark_notification_read,
@@ -119,10 +120,12 @@ initialize_storage()
 MANUAL_ONLY_CATEGORIES = {"Smartphone": "📱", "ID Card": "🪪", "Earphones": "🎧", "Keys": "🔑",
                           "Eyeglasses": "👓", "Water Bottle": "🧴", "Umbrella": "☂️", "Other": "📦"}
 
-MODEL_CATEGORIES = get_model_categories()
+MODEL_CATEGORIES = list(TRAINED_CATEGORIES)
 AI_CATEGORIES = {name: {"icon": "🔎"} for name in MODEL_CATEGORIES}
-ALL_CATEGORIES = list(dict.fromkeys(MODEL_CATEGORIES + list(MANUAL_ONLY_CATEGORIES)))
-CATEGORY_ICONS = {**{k: v["icon"] for k, v in AI_CATEGORIES.items()}, **MANUAL_ONLY_CATEGORIES}
+ALL_CATEGORIES = list(dict.fromkeys(
+    MODEL_CATEGORIES + [normalize_category(name) for name in MANUAL_ONLY_CATEGORIES]))
+CATEGORY_ICONS = {**{k: v["icon"] for k, v in AI_CATEGORIES.items()},
+                  **{normalize_category(k): v for k, v in MANUAL_ONLY_CATEGORIES.items()}}
 
 PAGES = [
     ("Home", "⌂"),
@@ -192,9 +195,9 @@ def make_thumbnail(image_bytes):
 
 
 @st.cache_data(show_spinner=False)
-def analyze_photo(image_bytes):
+def analyze_photo(image_bytes, model_version):
     """Cache model/OCR work across Streamlit reruns for the same uploaded photo."""
-    return classify_image(image_bytes)
+    return classify_image(image_bytes, model_version=model_version)
 
 
 def thumb(r, size=44):
@@ -225,6 +228,7 @@ def fmt_date(d):
 
 st.session_state.setdefault("page", "Home")
 st.session_state.setdefault("nonce", 0)          # bumped after a submit to reset the form
+st.session_state.setdefault("vision_model", "v1")
 if not st.session_state.get("reports_loaded", False):
     st.session_state.reports = load_reports()
     st.session_state.reports_loaded = True
@@ -232,8 +236,10 @@ st.session_state.setdefault("reports", [])
 st.session_state.setdefault("id_counter", 0)
 for _report in st.session_state.reports:
     _stored_brand = _report.get("brand", "")
+    _stored_category = _report.get("category", "")
     _report["brand"] = normalize_brand(_stored_brand)
-    if _report["brand"] != _stored_brand:
+    _report["category"] = normalize_category(_stored_category)
+    if _report["brand"] != _stored_brand or _report["category"] != _stored_category:
         save_report(_report)
 st.session_state.id_counter = max(
     st.session_state.id_counter,
@@ -558,6 +564,14 @@ with st.sidebar:
     <div style="color:#8da4be;font-size:11px">Campus Lost & Found</div></div></div>
     <div class="menu-label">MAIN MENU</div>
     """)
+    st.selectbox(
+        "Photo detector model",
+        options=list(MODEL_LABELS),
+        format_func=MODEL_LABELS.__getitem__,
+        key="vision_model",
+        help="This choice only changes photo analysis in your signed-in session.",
+    )
+    st.caption("Your detector choice applies only to your session.")
     for i, (name, icon) in enumerate(PAGES):
         unread_count = sum(notification["read_at"] is None for notification in st.session_state.notifications)
         label = f"{icon}   {name} ({unread_count})" if name == "Notifications" and unread_count else f"{icon}   {name}"
@@ -659,9 +673,9 @@ with body:
             f'<div style="background:#f7fafc;border:1px solid #e2e8f0;padding:10px 16px;border-radius:10px;'
             f'font-size:12px;font-weight:700">{v["icon"]} {k}</div>' for k, v in AI_CATEGORIES.items())
         with st.container(key="card_supported"):
-            html(f"""<div class="eyebrow">PHOTO RECOGNITION · YOLOv8</div>
-            <div style="font-size:16px;font-weight:800;color:#1a202c;margin-top:4px">{len(MODEL_CATEGORIES)} trained model categories</div>
-            <div style="color:#718096;font-size:12px;margin:4px 0 14px">YOLO suggests an item and bounding box. OCR reads visible text (not logos), while color is estimated from crop pixels. Confirm suggestions before saving.</div>
+            html(f"""<div class="eyebrow">PHOTO RECOGNITION · YOLO</div>
+            <div style="font-size:16px;font-weight:800;color:#1a202c;margin-top:4px">{len(MODEL_CATEGORIES)} supported categories across V1 and V2</div>
+            <div style="color:#718096;font-size:12px;margin:4px 0 14px">Choose your detector in the sidebar. YOLO suggests an item and bounding box. OCR reads visible text (not logos), while color is estimated from crop pixels. Confirm suggestions before saving.</div>
             <div style="display:flex;gap:12px;flex-wrap:wrap">{chips}</div>""")
 
         st.write("")
@@ -720,7 +734,7 @@ with body:
                 photo_uri = make_thumbnail(photo_bytes)
                 try:
                     with st.spinner("Detecting item and analyzing its crop…"):
-                        suggestion = analyze_photo(photo_bytes)
+                        suggestion = analyze_photo(photo_bytes, st.session_state.vision_model)
                 except (NotImplementedError, FileNotFoundError, RuntimeError, ValueError) as exc:
                     suggestion = {"category": None, "confidence": None, "color": None,
                                   "brand": None, "brand_candidates": [], "text_candidates": [],
