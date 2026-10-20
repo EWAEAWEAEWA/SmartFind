@@ -16,7 +16,7 @@ MODEL_PATHS = {
     "v1": Path(os.environ.get("SMARTFIND_MODEL_PATH", _MODEL_DIRECTORY / "best.pt")),
     "v2": Path(os.environ.get("SMARTFIND_MODEL_V2_PATH", _MODEL_DIRECTORY / "best_v2.pt")),
 }
-MODEL_LABELS = {"v1": "V1 (original best.pt)", "v2": "V2 (friend-trained best (1).pt)"}
+MODEL_LABELS = {"v1": "V1", "v2": "V2"}
 MODEL_PATH = MODEL_PATHS["v1"]
 CONFIDENCE_THRESHOLD = float(os.environ.get("SMARTFIND_DETECTION_CONFIDENCE", "0.40"))
 RECOGNIZER_MODE = "model" if MODEL_PATH.is_file() else "unavailable"
@@ -138,6 +138,16 @@ def normalize_brand(value):
     text = " ".join(str(value or "").strip().split())
     key = re.sub(r"[^a-z0-9]", "", text.casefold())
     return _BRAND_LOOKUP.get(key, text)
+
+
+def normalize_brand_candidates(candidates, detected_brand=None):
+    """Put the detected brand first, then keep distinct OCR candidates in rank order."""
+    ordered = []
+    for value in (detected_brand, *candidates):
+        brand = normalize_brand(value)
+        if brand and brand not in ordered:
+            ordered.append(brand)
+    return ordered
 
 
 @lru_cache(maxsize=2)

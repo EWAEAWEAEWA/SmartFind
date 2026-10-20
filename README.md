@@ -1,6 +1,6 @@
 # SmartFind — Campus Lost & Found
 
-SmartFind is a Streamlit browser app for submitting lost/found reports and ranking possible matches. The trained YOLO model in `models/best.pt` detects supported item categories and returns a bounding box; the app analyzes that crop for a color estimate and optional OCR text. Users confirm or edit all suggestions before saving.
+SmartFind is a Streamlit browser app for submitting lost/found reports and ranking possible matches. During Step 1, each user can choose V1 (`models/best.pt`) or V2 (`models/best_v2.pt`) for photo detection; the choice is private to their session. The selected YOLO model detects supported item categories and returns a bounding box; the app analyzes that crop for a color estimate and optional OCR text. Detected brand candidates are preselected in the report form, and users can change suggestions before saving.
 
 ## Run locally
 
@@ -75,7 +75,7 @@ The included `Dockerfile` builds a browser-accessible container. Build and run i
 
 ## How suggestions and matches work
 
-1. A user uploads or takes a photo in the lost/found form.
+1. A user selects V1 or V2 and uploads or takes a photo in Step 1 of the lost/found form.
 2. If YOLO detects an item, the detected crop is analyzed. If it returns no box, SmartFind still runs OCR on the full photo and estimates color from its center region; the category must then be selected manually.
 3. RapidOCR reads text and matches it to canonical brand labels, including configured legal-name aliases. The brand form is a category-specific list with OCR candidates, an Unknown choice, and a manual Other option. Color is a rough pixel estimate.
 4. Confirmed category, color, canonical brand, date, location, description, owner identity, and photo thumbnail are saved in Supabase PostgreSQL.

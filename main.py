@@ -26,7 +26,7 @@ from smartfind_core import (MATCH_THRESHOLD, NOTIFY_THRESHOLD, calculate_match_s
 from smartfind_auth import resolve_role
 from smartfind_vision import (MODEL_LABELS, MODEL_PATHS, TRAINED_CATEGORIES,
                               brands_for_category, classify_image, normalize_brand,
-                              normalize_category)
+                              normalize_brand_candidates, normalize_category)
 from smartfind_store import (delete_report, load_notifications, load_reports,
                              fail_stuck_notification_emails, mark_all_notifications_read,
                              mark_notification_read,
@@ -564,14 +564,6 @@ with st.sidebar:
     <div style="color:#8da4be;font-size:11px">Campus Lost & Found</div></div></div>
     <div class="menu-label">MAIN MENU</div>
     """)
-    st.selectbox(
-        "Photo detector model",
-        options=list(MODEL_LABELS),
-        format_func=MODEL_LABELS.__getitem__,
-        key="vision_model",
-        help="This choice only changes photo analysis in your signed-in session.",
-    )
-    st.caption("Your detector choice applies only to your session.")
     for i, (name, icon) in enumerate(PAGES):
         unread_count = sum(notification["read_at"] is None for notification in st.session_state.notifications)
         label = f"{icon}   {name} ({unread_count})" if name == "Notifications" and unread_count else f"{icon}   {name}"
@@ -715,6 +707,13 @@ with body:
             # ---------------- Step 1: photo ----------------
             st.markdown("##### 📷 Step 1 — Add a photo")
             st.caption("Optional. The trained YOLO model detects an item crop; OCR and color are best-effort suggestions that you can edit.")
+            st.selectbox(
+                "Photo detector model",
+                options=list(MODEL_LABELS),
+                format_func=MODEL_LABELS.__getitem__,
+                key="vision_model",
+                help="This choice only changes photo analysis in your signed-in session.",
+            )
             UP, CAM, NONE = "📁 Choose / upload", "📸 Take photo", "✍️ No photo"
             mode = st.radio("Photo source", [UP, CAM, NONE], horizontal=True,
                             label_visibility="collapsed", key=f"mode_{rtype}_{nonce}")
@@ -751,7 +750,7 @@ with body:
                     brand_suggestions = suggestion.get("brand_candidates", [])
                     if brand_suggestions:
                         candidate_text = ", ".join(esc(candidate) for candidate in brand_suggestions)
-                        note += f' Possible brand-name reads: <strong>{candidate_text}</strong> (confirm manually).'
+                        note += f' Possible brand-name reads: <strong>{candidate_text}</strong> (preselected below when recognized).'
                     other_text = suggestion.get("text_candidates", [])
                     if other_text:
                         candidate_text = ", ".join(esc(candidate) for candidate in other_text)
@@ -788,20 +787,23 @@ with body:
             st.markdown("##### 📝 Step 2 — Confirm the details")
             sug_cat = suggestion["category"] if suggestion else None
             sug_col = (suggestion.get("color") if suggestion else None) or ""
-            brand_candidates = suggestion.get("brand_candidates", []) if suggestion else []
+            brand_candidates = normalize_brand_candidates(
+                suggestion.get("brand_candidates", []) if suggestion else [],
+                suggestion.get("brand") if suggestion else None,
+            )
             sig = hashlib.md5(photo_bytes).hexdigest()[:8] if photo_bytes else "nophoto"
             cat_index = ALL_CATEGORIES.index(sug_cat) if sug_cat in ALL_CATEGORIES else None
             cat = st.selectbox("Item category *", ALL_CATEGORIES, index=cat_index,
                                placeholder="Select a category", key=f"category_{rtype}_{nonce}_{sig}")
             category_brands = brands_for_category(cat)
-            ocr_brands = [normalize_brand(value) for value in brand_candidates]
-            known_brands = list(dict.fromkeys(ocr_brands + category_brands))
+            known_brands = list(dict.fromkeys(brand_candidates + category_brands))
             brand_options = ["Unknown / no visible brand"] + known_brands + ["Other / not listed"]
-            suggested_brand = next((brand for brand in ocr_brands if brand in known_brands), None)
+            suggested_brand = next((brand for brand in brand_candidates if brand in known_brands), None)
             brand_index = brand_options.index(suggested_brand) if suggested_brand else 0
             brand_choice = st.selectbox(
-                "Brand (optional; OCR suggestion is preselected when available)", brand_options,
-                index=brand_index, key=f"brand_choice_{rtype}_{nonce}_{sig}")
+                "Brand (optional; detected brand is preselected)", brand_options,
+                index=brand_index,
+                key=f"brand_choice_{rtype}_{nonce}_{st.session_state.vision_model}_{sig}")
             manual_brand = ""
             if brand_choice == "Other / not listed":
                 manual_brand = st.text_input(

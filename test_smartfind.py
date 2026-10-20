@@ -208,6 +208,7 @@ class VisionScopeTests(unittest.TestCase):
     def test_both_model_versions_have_checkpoints_and_labels(self):
         self.assertEqual(set(smartfind_vision.MODEL_PATHS), {"v1", "v2"})
         self.assertEqual(set(smartfind_vision.MODEL_LABELS), {"v1", "v2"})
+        self.assertEqual(smartfind_vision.MODEL_LABELS, {"v1": "V1", "v2": "V2"})
         self.assertTrue(smartfind_vision.MODEL_PATHS["v1"].is_file())
         self.assertTrue(smartfind_vision.MODEL_PATHS["v2"].is_file())
         self.assertEqual(len(smartfind_vision.TRAINED_CATEGORIES), 24)
@@ -350,6 +351,11 @@ class VisionScopeTests(unittest.TestCase):
         for source, canonical in aliases.items():
             with self.subTest(source=source):
                 self.assertEqual(smartfind_vision.normalize_category(source), canonical)
+
+    def test_detected_brand_is_first_and_normalized_for_auto_selection(self):
+        candidates = smartfind_vision.normalize_brand_candidates(
+            ["Samsung", "Apple"], "Samsung Electronics Co., Ltd.")
+        self.assertEqual(candidates, ["Samsung", "Apple"])
 
     def test_color_estimator_returns_named_color(self):
         from PIL import Image
@@ -495,9 +501,18 @@ class MobileNavigationTests(unittest.TestCase):
 
     def test_each_session_selects_and_passes_its_own_detector(self):
         source = Path("main.py").read_text(encoding="utf-8")
-        self.assertIn('key="vision_model"', source)
+        step_one = source[source.index("# ---------------- Step 1: photo ----------------"):
+                           source.index("# ---------------- Step 2: details ----------------")]
+        self.assertIn('key="vision_model"', step_one)
         self.assertIn("analyze_photo(photo_bytes, st.session_state.vision_model)", source)
         self.assertIn("This choice only changes photo analysis in your signed-in session.", source)
+        self.assertNotIn('key="vision_model"', source[source.index("with st.sidebar:"):source.index('html(f"""', source.index("with st.sidebar:"))])
+
+    def test_detected_brand_is_preselected_in_report_form(self):
+        source = Path("main.py").read_text(encoding="utf-8")
+        self.assertIn("normalize_brand_candidates(", source)
+        self.assertIn("Brand (optional; detected brand is preselected)", source)
+        self.assertIn("brand_index = brand_options.index(suggested_brand) if suggested_brand else 0", source)
 
 
 class EmailDeliveryTests(unittest.TestCase):
