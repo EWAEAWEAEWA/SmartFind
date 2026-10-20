@@ -11,7 +11,7 @@ python -m pip install -r requirements.txt
 streamlit run main.py
 ```
 
-Open the local URL printed by Streamlit (normally `http://localhost:8501`) in a browser. Keep both `models/best.pt` (V1, loaded with Ultralytics) and `models/best_v2.pt` (V2, the YOLOv5 checkpoint loaded with the `yolov5` runtime) in place. Each signed-in user can select their detector in the sidebar; the choice is private to that Streamlit session and does not affect other users. Set `SMARTFIND_MODEL_PATH` or `SMARTFIND_MODEL_V2_PATH` to override either checkpoint. `SMARTFIND_DETECTION_CONFIDENCE` optionally changes the detector threshold for both (default `0.40`; tune against representative campus photos).
+Open the local URL printed by Streamlit (normally `http://localhost:8501`) in a browser. Keep both `models/best.pt` (V1, loaded with Ultralytics) and `models/best_v2.pt` (V2, the YOLOv5 checkpoint loaded with the `yolov5` runtime) in place. The `setuptools<82` pin is required because YOLOv5 7.0.14 imports `pkg_resources`, which newer setuptools versions removed. Each signed-in user can select their detector in the sidebar; the choice is private to that Streamlit session and does not affect other users. Set `SMARTFIND_MODEL_PATH` or `SMARTFIND_MODEL_V2_PATH` to override either checkpoint. `SMARTFIND_DETECTION_CONFIDENCE` optionally changes the detector threshold for both (default `0.40`; tune against representative campus photos).
 
 ## Sign-in and roles
 

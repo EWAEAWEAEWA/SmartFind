@@ -1,6 +1,8 @@
 streamlit[auth]>=1.42
 ultralytics>=8.3,<9
 yolov5>=7.0.14,<8
+# YOLOv5 7.0.14 still imports pkg_resources, removed in setuptools 82.
+setuptools>=77.0.3,<82
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.14.1+cpu
 torchvision==0.29.1+cpu
