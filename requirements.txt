@@ -6,3 +6,4 @@ torchvision==0.29.1+cpu
 Pillow>=10.0
 pytesseract>=0.3.13
 rapidocr-onnxruntime>=1.4,<2
+psycopg[binary]>=3.2,<4

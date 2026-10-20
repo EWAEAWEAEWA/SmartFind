@@ -31,6 +31,7 @@ from smartfind_store import (delete_report, load_notifications, load_reports,
                              mark_notification_read,
                              notification_keys, pending_notification_emails,
                              claim_notification_email, finish_notification_email,
+                             configure_supabase, migrate_sqlite_to_supabase, using_supabase,
                              retry_notification_email, save_notifications, save_report,
                              seed_reports_if_empty)
 from smartfind_mail import SMTPDeliveryError, is_configured, send_match_email, test_smtp_connection
@@ -71,8 +72,9 @@ def _current_user():
     try:
         auth_config = dict(st.secrets.get("auth", {}))
         app_config = dict(st.secrets.get("smartfind", {}))
+        supabase_config = dict(st.secrets.get("supabase", {}))
     except Exception:
-        auth_config, app_config = {}, {}
+        auth_config, app_config, supabase_config = {}, {}, {}
 
     required_auth = ("redirect_uri", "cookie_secret", "client_id", "client_secret",
                      "server_metadata_url")
@@ -95,10 +97,12 @@ def _current_user():
         st.error("This verified account is not authorized to use SmartFind.")
         st.button("Sign out", on_click=st.logout)
         st.stop()
-    return {"email": email, "name": st.user.get("name") or email, "role": role}
+    return {"email": email, "name": st.user.get("name") or email, "role": role,
+            "supabase_database_url": supabase_config.get("database_url", "")}
 
 
 current_user = _current_user()
+configure_supabase(current_user["supabase_database_url"])
 
 # ============================================================
 # CONFIGURATION  (edit here — nothing else needs to change)
@@ -238,7 +242,8 @@ st.session_state.setdefault(
     max((int(r["id"].split("-")[-1]) for r in st.session_state.reports), default=0))
 
 if not st.session_state.get("reports_loaded", False):
-    seed_reports_if_empty(st.session_state.reports)
+    if not using_supabase():
+        seed_reports_if_empty(st.session_state.reports)
     st.session_state.reports_loaded = True
 st.session_state.reports = load_reports()
 for _report in st.session_state.reports:
@@ -652,7 +657,7 @@ with body:
             ("Photo recognition", f"{'YOLOv8 model loaded' if MODEL_CATEGORIES else 'Model unavailable — manual reports still work'}; category, crop, OCR text and color suggestions", "ok" if MODEL_CATEGORIES else "warn"),
             ("Matching agent", "Working — rule-based scoring", "ok"),
             ("Notifications", "Persistent private inbox for both owners; SMTP email when configured", "ok"),
-            ("Storage", "SQLite — reports persist across browser sessions on the configured disk", "ok"),
+            ("Storage", "Supabase PostgreSQL" if using_supabase() else "SQLite local database", "ok"),
             ("Admin access", "Verified OIDC login with an explicit admin email allowlist", "ok"),
         ]
         items = "".join(
@@ -1045,6 +1050,20 @@ with body:
                 st.error(f"SMTP connection test failed: {esc(exc)}")
             else:
                 st.success("Gmail SMTP connection and login succeeded. No email was sent.")
+
+        if using_supabase():
+            st.info("Supabase PostgreSQL is active. Import this app instance's SQLite reports and inbox once; existing IDs are preserved and repeated imports are safe.")
+            if st.button("Import existing SQLite data to Supabase", key="migrate_sqlite_to_supabase"):
+                try:
+                    migration = migrate_sqlite_to_supabase()
+                except Exception as exc:
+                    st.error(f"Migration failed: {esc(exc)}")
+                else:
+                    st.session_state.reports = load_reports()
+                    st.success(f"Imported {migration['reports']} reports and "
+                               f"{migration['notifications']} notifications from {migration['source']}.")
+        else:
+            st.info("SQLite is active. Add [supabase].database_url to Streamlit Secrets to switch this app to Supabase.")
 
         reps = st.session_state.reports
         stats = [("ⓘ", "Total Lost Reports", sum(r["type"] == "Lost" for r in reps)),
