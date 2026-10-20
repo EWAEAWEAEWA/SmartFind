@@ -4,13 +4,16 @@ YOLO supplies an item category and bounding box; it does not identify an individ
 item or prove ownership. OCR extracts candidate text only (it cannot recognize logos).
 """
 from functools import lru_cache
-from pathlib import Path
 from collections import defaultdict
+from collections import OrderedDict
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 import io
+import importlib
 import os
 import re
-from collections import OrderedDict
+import sys
+from pathlib import Path
 from pathlib import PosixPath
 
 _MODEL_DIRECTORY = Path(__file__).parent / "models"
@@ -152,21 +155,48 @@ def normalize_brand_candidates(candidates, detected_brand=None):
     return ordered
 
 
+@contextmanager
+def _yolov5_legacy_module_paths():
+    """Expose packaged YOLOv5 modules at the import paths recorded in old checkpoints."""
+    models_package = importlib.import_module("yolov5.models")
+    common_module = importlib.import_module("yolov5.models.common")
+    yolo_module = importlib.import_module("yolov5.models.yolo")
+    aliases = {
+        "models": models_package,
+        "models.common": common_module,
+        "models.yolo": yolo_module,
+    }
+    missing = object()
+    previous = {name: sys.modules.get(name, missing) for name in aliases}
+    try:
+        sys.modules.update(aliases)
+        yield
+    finally:
+        for name, module in previous.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
 def _load_yolov5_model(model_path):
     """Load the trusted project checkpoint using PyTorch's restricted unpickler."""
     import torch
-    from models.common import Bottleneck, C3, Concat, Conv, SPPF
-    from models.yolo import Detect, DetectionModel
     from torch.nn import (BatchNorm2d, Conv2d, ModuleList, Sequential, SiLU,
                          MaxPool2d, Upsample)
     from yolov5 import load
 
+    common_module = importlib.import_module("yolov5.models.common")
+    yolo_module = importlib.import_module("yolov5.models.yolo")
+    common_classes = ("Bottleneck", "C3", "Concat", "Conv", "SPPF")
+    yolo_classes = ("Detect", "DetectionModel")
     safe_classes = [
-        Bottleneck, C3, Concat, Conv, SPPF, Detect, DetectionModel,
+        *((getattr(common_module, name), f"models.common.{name}") for name in common_classes),
+        *((getattr(yolo_module, name), f"models.yolo.{name}") for name in yolo_classes),
         BatchNorm2d, Conv2d, ModuleList, Sequential, SiLU, MaxPool2d, Upsample,
         OrderedDict, PosixPath, set,
     ]
-    with torch.serialization.safe_globals(safe_classes):
+    with _yolov5_legacy_module_paths(), torch.serialization.safe_globals(safe_classes):
         model = load(str(model_path), device="cpu")
     model.conf = CONFIDENCE_THRESHOLD
     return model
