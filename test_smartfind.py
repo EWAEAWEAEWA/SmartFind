@@ -3,8 +3,6 @@ import unittest
 import sys
 import types
 from pathlib import Path
-import sqlite3
-from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import smartfind_mail
@@ -258,22 +256,6 @@ class VisionScopeTests(unittest.TestCase):
 
 
 class ReportStoreTests(unittest.TestCase):
-    def test_sqlite_initialization_is_not_repeated_for_each_operation(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "once.db"
-                target = ("sqlite", str(smartfind_store.DB_PATH.resolve()))
-                smartfind_store._INITIALIZED_TARGETS.discard(target)
-                smartfind_store.initialize_storage()
-                self.assertIn(target, smartfind_store._INITIALIZED_TARGETS)
-                smartfind_store.save_report(report("L1", "Lost"))
-                self.assertEqual(len(smartfind_store.load_reports()), 1)
-                # The backend remains marked initialized after normal operations.
-                self.assertIn(target, smartfind_store._INITIALIZED_TARGETS)
-        finally:
-            smartfind_store.DB_PATH = old_path
-
     def test_postgres_schema_is_initialized_once_and_queries_contain_no_ddl(self):
         class FakeCursor:
             rowcount = 1
@@ -331,66 +313,6 @@ class ReportStoreTests(unittest.TestCase):
             smartfind_store._INITIALIZED_TARGETS.clear()
             smartfind_store._INITIALIZED_TARGETS.update(old_initialized)
 
-    def test_reports_persist_and_old_records_get_brand_default(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "reports.db"
-                report_data = report("L1", "Lost")
-                report_data.pop("brand", None)
-                smartfind_store.seed_reports_if_empty([report_data])
-                self.assertEqual(smartfind_store.load_reports()[0]["brand"], "")
-                report_data["brand"] = "ASUS"
-                smartfind_store.save_report(report_data)
-                self.assertEqual(smartfind_store.load_reports()[0]["brand"], "ASUS")
-                smartfind_store.delete_report("L1")
-                self.assertEqual(smartfind_store.load_reports(), [])
-        finally:
-            smartfind_store.DB_PATH = old_path
-
-    def test_notification_inbox_is_private_and_read_state_persists(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "notifications.db"
-                smartfind_store.save_notifications([
-                    {"key": "L1_F1_owner1", "pair_key": "L1_F1", "recipient": "owner1@example.com",
-                     "item": "Phone", "score": 90, "time": "now"},
-                    {"key": "L1_F1_owner2", "pair_key": "L1_F1", "recipient": "owner2@example.com",
-                     "item": "Phone", "score": 90, "time": "now"},
-                ])
-                owner_one = smartfind_store.load_notifications("OWNER1@example.com")
-                self.assertEqual(len(owner_one), 1)
-                smartfind_store.mark_notification_read(owner_one[0]["id"], "owner2@example.com", "later")
-                self.assertEqual(len(smartfind_store.load_notifications("owner1@example.com", unread_only=True)), 1)
-                smartfind_store.mark_notification_read(owner_one[0]["id"], "owner1@example.com", "later")
-                self.assertEqual(smartfind_store.load_notifications("owner1@example.com", unread_only=True), [])
-        finally:
-            smartfind_store.DB_PATH = old_path
-
-    def test_legacy_notifications_are_not_queued_for_email(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "legacy.db"
-                connection = sqlite3.connect(smartfind_store.DB_PATH)
-                try:
-                    connection.execute("""CREATE TABLE notifications (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, pair_key TEXT,
-                        recipient TEXT, item TEXT, score INTEGER, created_at TEXT, read_at TEXT)""")
-                    connection.execute("""INSERT INTO notifications
-                        (key, pair_key, recipient, item, score, created_at)
-                        VALUES ('old-key', 'L1_F1', 'owner@example.com', 'Phone', 90, 'old')""")
-                    connection.commit()
-                finally:
-                    connection.close()
-                notification = smartfind_store.load_notifications("owner@example.com")[0]
-                self.assertEqual(notification["email_status"], "legacy")
-                self.assertEqual(smartfind_store.pending_notification_emails(), [])
-        finally:
-            smartfind_store.DB_PATH = old_path
-
-
 class AuthenticationTests(unittest.TestCase):
     def test_only_verified_allowlisted_identities_receive_roles(self):
         self.assertEqual(resolve_role("Student@TIP.edu.ph", True, ["tip.edu.ph"], []), "student")
@@ -400,12 +322,13 @@ class AuthenticationTests(unittest.TestCase):
 
 
 class MobileNavigationTests(unittest.TestCase):
-    def test_mobile_css_keeps_native_sidebar_hamburger_visible_and_tappable(self):
+    def test_mobile_menu_is_visible_and_uses_the_same_navigation_targets(self):
         source = Path("main.py").read_text(encoding="utf-8")
         mobile_css = source[source.index("@media (max-width: 700px)"):]
-        self.assertIn('[data-testid="stSidebarCollapsedControl"]', mobile_css)
-        self.assertIn("visibility:visible !important", mobile_css)
-        self.assertIn("pointer-events:auto", mobile_css)
+        self.assertIn('key="mobile_nav"', source)
+        self.assertIn('st.popover("☰ Menu")', source)
+        self.assertIn('navigate(name)', source)
+        self.assertIn(".st-key-mobile_nav", mobile_css)
         self.assertIn("min-width:44px", mobile_css)
 
 
@@ -439,45 +362,6 @@ class EmailDeliveryTests(unittest.TestCase):
         with patch("smartfind_mail.smtplib.SMTP", return_value=server):
             with self.assertRaisesRegex(smartfind_mail.SMTPDeliveryError, "STARTTLS: ConnectionError"):
                 smartfind_mail.test_smtp_connection(settings)
-
-    def test_failed_delivery_can_be_retried_once(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "email.db"
-                entry = {"key": "p_owner@example.com", "pair_key": "p",
-                         "recipient": "owner@example.com", "item": "Phone", "score": 90, "time": "now"}
-                smartfind_store.save_notifications([entry])
-                notification = smartfind_store.pending_notification_emails()[0]
-                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
-                smartfind_store.finish_notification_email(notification["id"], "failed", error="SMTP unavailable")
-                self.assertTrue(smartfind_store.retry_notification_email(notification["id"], "owner@example.com"))
-                self.assertFalse(smartfind_store.retry_notification_email(notification["id"], "other@example.com"))
-                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
-                smartfind_store.finish_notification_email(notification["id"], "sent", timestamp="later")
-                saved = smartfind_store.load_notifications("owner@example.com")[0]
-                self.assertEqual((saved["email_status"], saved["email_sent_at"]), ("sent", "later"))
-        finally:
-            smartfind_store.DB_PATH = old_path
-
-    def test_abandoned_sending_state_recovers_to_failed(self):
-        old_path = smartfind_store.DB_PATH
-        try:
-            with TemporaryDirectory() as directory:
-                smartfind_store.DB_PATH = Path(directory) / "stuck.db"
-                entry = {"key": "p_owner@example.com", "pair_key": "p",
-                         "recipient": "owner@example.com", "item": "Phone", "score": 90, "time": "now"}
-                smartfind_store.save_notifications([entry])
-                notification = smartfind_store.pending_notification_emails()[0]
-                self.assertTrue(smartfind_store.claim_notification_email(notification["id"]))
-                self.assertEqual(smartfind_store.fail_stuck_notification_emails(stale_after_seconds=-1), 1)
-                saved = smartfind_store.load_notifications("owner@example.com")[0]
-                self.assertEqual(saved["email_status"], "failed")
-                self.assertIn("check the inbox", saved["email_error"])
-                self.assertEqual(smartfind_store.pending_notification_emails(), [])
-        finally:
-            smartfind_store.DB_PATH = old_path
-
 
 if __name__ == "__main__":
     unittest.main()

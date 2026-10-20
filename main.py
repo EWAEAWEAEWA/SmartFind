@@ -31,9 +31,9 @@ from smartfind_store import (delete_report, load_notifications, load_reports,
                              mark_notification_read,
                              notification_keys, pending_notification_emails,
                              claim_notification_email, finish_notification_email,
-                             configure_supabase, initialize_storage, migrate_sqlite_to_supabase, using_supabase,
+                             configure_supabase, initialize_storage,
                              retry_notification_email, save_notifications, save_report,
-                             seed_reports_if_empty)
+                             )
 from smartfind_mail import SMTPDeliveryError, is_configured, send_match_email, test_smtp_connection
 
 st.set_page_config(page_title="SmartFind - Campus Lost & Found", page_icon="🔎",
@@ -103,6 +103,10 @@ def _current_user():
 
 current_user = _current_user()
 configure_supabase(current_user["supabase_database_url"])
+if not str(current_user["supabase_database_url"]).strip():
+    st.error("Supabase database_url is required; SQLite storage is no longer supported.")
+    st.info("Add [supabase].database_url to Streamlit Secrets before using SmartFind.")
+    st.stop()
 # Schema setup is an explicit, one-time migration step per app process.  Query
 # functions below only open a short-lived connection for their own operation.
 initialize_storage()
@@ -216,39 +220,16 @@ def fmt_date(d):
 
 
 # ============================================================
-# SESSION STATE  (reports are loaded from SQLite on every app rerun)
+# SESSION STATE  (Supabase is read once per signed-in session, not per navigation)
 # ============================================================
 
 st.session_state.setdefault("page", "Home")
 st.session_state.setdefault("nonce", 0)          # bumped after a submit to reset the form
-st.session_state.setdefault("reports", [
-    {"id": "SF-2026-001", "type": "Lost", "item": "Black Scientific Calculator", "category": "Calculator",
-     "color": "Black", "location": "Q-5312", "date": "2026-09-30", "photo": None,
-     "description": "Casio FX-991EX scientific calculator with black protective cover.",
-     "status": "Searching", "user_email": "student1@tip.edu.ph"},
-    {"id": "SF-2026-002", "type": "Found", "item": "Black Scientific Calculator", "category": "Calculator",
-     "color": "Black", "location": "Q-5312", "date": "2026-10-01", "photo": None,
-     "description": "Black Casio scientific calculator left on desk near whiteboard.",
-     "status": "Reported", "user_email": "finder1@tip.edu.ph"},
-    {"id": "SF-2026-003", "type": "Found", "item": "Blue Water Bottle", "category": "Water Bottle",
-     "color": "Blue", "location": "Library — 2nd Floor", "date": "2026-10-02", "photo": None,
-     "description": "Aquaflask stainless water bottle with stickers.",
-     "status": "Reported", "user_email": "finder2@tip.edu.ph"},
-    {"id": "SF-2026-004", "type": "Lost", "item": "Student ID Lanyard", "category": "ID Card",
-     "color": "Navy Blue", "location": "Study Hall", "date": "2026-10-03", "photo": None,
-     "description": "TIP student ID card with blue lanyard and key holder.",
-     "status": "Searching", "user_email": "student2@tip.edu.ph"},
-])
-
-st.session_state.setdefault(
-    "id_counter",
-    max((int(r["id"].split("-")[-1]) for r in st.session_state.reports), default=0))
-
 if not st.session_state.get("reports_loaded", False):
-    if not using_supabase():
-        seed_reports_if_empty(st.session_state.reports)
+    st.session_state.reports = load_reports()
     st.session_state.reports_loaded = True
-st.session_state.reports = load_reports()
+st.session_state.setdefault("reports", [])
+st.session_state.setdefault("id_counter", 0)
 for _report in st.session_state.reports:
     _stored_brand = _report.get("brand", "")
     _report["brand"] = normalize_brand(_stored_brand)
@@ -294,6 +275,7 @@ def auto_monitor_and_notify():
         st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
     save_notifications(notifications)
     deliver_pending_notification_emails()
+    st.session_state.notifications = load_notifications(current_user["email"])
 
 
 try:
@@ -301,7 +283,10 @@ try:
 except Exception:
     mail_config = {}
 
-st.session_state.notifications = load_notifications(current_user["email"])
+if st.session_state.get("notifications_loaded_for") != current_user["email"]:
+    st.session_state.notifications = load_notifications(current_user["email"])
+    st.session_state.notifications_loaded_for = current_user["email"]
+st.session_state.setdefault("notifications", [])
 
 # ============================================================
 # CSS
@@ -491,6 +476,10 @@ details.rec[open] .rec-more {{ color:#2a9d8f; }}
 
 /* ---------- PHONE ---------- */
 @media (max-width: 700px) {{
+  /* App-owned menu: works even when Streamlit changes its sidebar-toggle DOM. */
+  .st-key-mobile_nav {{ display:block !important; position:fixed; top:8px; left:8px; z-index:100002; }}
+  .st-key-mobile_nav button {{ min-width:44px; min-height:44px; border-radius:8px;
+    background:#0d2847 !important; color:#fff !important; border:1px solid #2a9d8f !important; }}
   /* Keep Streamlit's collapsed-sidebar control above the app's custom chrome. */
   header[data-testid="stHeader"] {{ height:3.5rem; position:fixed; inset:0 0 auto 0; z-index:100000; pointer-events:none; }}
   header[data-testid="stHeader"] button,
@@ -527,12 +516,20 @@ details.rec[open] .rec-more {{ color:#2a9d8f; }}
   div[class*="st-key-row_"] [data-testid="stColumn"]:first-child, div[class*="st-key-row_"] [data-testid="column"]:first-child {{
     min-width:100% !important; }}
 }}
+.st-key-mobile_nav {{ display:none; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
 # SHARED DIALOG
 # ============================================================
+
+with st.container(key="mobile_nav"):
+    with st.popover("☰ Menu"):
+        st.caption("Navigate SmartFind")
+        for i, (name, icon) in enumerate(PAGES):
+            if st.button(f"{icon}  {name}", key=f"mobile_nav_{i}", **STRETCH):
+                navigate(name)
 
 @st.dialog("Report details")
 def show_details(rid):
@@ -672,7 +669,7 @@ with body:
             ("Photo recognition", f"{'YOLOv8 model loaded' if MODEL_CATEGORIES else 'Model unavailable — manual reports still work'}; category, crop, OCR text and color suggestions", "ok" if MODEL_CATEGORIES else "warn"),
             ("Matching agent", "Working — rule-based scoring", "ok"),
             ("Notifications", "Persistent private inbox for both owners; SMTP email when configured", "ok"),
-            ("Storage", "Supabase PostgreSQL" if using_supabase() else "SQLite local database", "ok"),
+            ("Storage", "Supabase PostgreSQL", "ok"),
             ("Admin access", "Verified OIDC login with an explicit admin email allowlist", "ok"),
         ]
         items = "".join(
@@ -835,7 +832,6 @@ with body:
                     save_report(st.session_state.reports[-1])
                     before = len(st.session_state.notifications)
                     auto_monitor_and_notify()
-                    st.session_state.notifications = load_notifications(current_user["email"])
                     n_matches = sum(1 for p in current_pairs() if rid in (p[1]["id"], p[2]["id"]))
                     msg = f"Report {rid} saved. "
                     if n_matches:
@@ -997,12 +993,13 @@ with body:
         html("""<div class="eyebrow">YOUR SMARTFIND INBOX</div>
         <div class="page-title">Notifications</div>
         <div class="page-sub">Strong possible matches for your reports. Inbox notices always appear here; email delivery status is shown on each notice.</div>""")
-        notifications = load_notifications(current_user["email"])
+        notifications = st.session_state.notifications
         unread_count = sum(notification["read_at"] is None for notification in notifications)
         header_left, header_right = st.columns([3, 1])
         header_left.caption(f"{len(notifications)} notifications · {unread_count} unread")
         if unread_count and header_right.button("Mark all read", **STRETCH):
             mark_all_notifications_read(current_user["email"], datetime.now().isoformat(timespec="seconds"))
+            st.session_state.notifications = load_notifications(current_user["email"])
             st.rerun()
         if not notifications:
             st.info("No match notifications yet. SmartFind will add one when a strong possible match is found.")
@@ -1027,6 +1024,7 @@ with body:
                         "Mark read", key=f"notif_read_{notification['id']}"):
                     mark_notification_read(notification["id"], current_user["email"],
                                            datetime.now().isoformat(timespec="seconds"))
+                    st.session_state.notifications = load_notifications(current_user["email"])
                     st.rerun()
                 if button_cols[1].button("View matches", key=f"notif_matches_{notification['id']}"):
                     navigate("Possible Matches")
@@ -1034,6 +1032,7 @@ with body:
                         "Retry email", key=f"notif_retry_{notification['id']}"):
                     if retry_notification_email(notification["id"], current_user["email"]):
                         deliver_pending_notification_emails()
+                        st.session_state.notifications = load_notifications(current_user["email"])
                     st.rerun()
                 if email_status == "failed":
                     if "check the inbox before retrying" in str(notification.get("email_error", "")).casefold():
@@ -1065,20 +1064,6 @@ with body:
                 st.error(f"SMTP connection test failed: {esc(exc)}")
             else:
                 st.success("Gmail SMTP connection and login succeeded. No email was sent.")
-
-        if using_supabase():
-            st.info("Supabase PostgreSQL is active. Import this app instance's SQLite reports and inbox once; existing IDs are preserved and repeated imports are safe.")
-            if st.button("Import existing SQLite data to Supabase", key="migrate_sqlite_to_supabase"):
-                try:
-                    migration = migrate_sqlite_to_supabase()
-                except Exception as exc:
-                    st.error(f"Migration failed: {esc(exc)}")
-                else:
-                    st.session_state.reports = load_reports()
-                    st.success(f"Imported {migration['reports']} reports and "
-                               f"{migration['notifications']} notifications from {migration['source']}.")
-        else:
-            st.info("SQLite is active. Add [supabase].database_url to Streamlit Secrets to switch this app to Supabase.")
 
         reps = st.session_state.reports
         stats = [("ⓘ", "Total Lost Reports", sum(r["type"] == "Lost" for r in reps)),

@@ -44,7 +44,7 @@ For the hosted app, set `redirect_uri` to `https://<your-app-subdomain>.streamli
 
 ## Supabase database
 
-SmartFind uses local SQLite by default. To use your Supabase PostgreSQL project, add this to Streamlit Cloud **Secrets** (or local `.streamlit/secrets.toml`):
+SmartFind uses Supabase PostgreSQL. Add this to Streamlit Cloud **Secrets** (or local `.streamlit/secrets.toml`):
 
 ```toml
 [supabase]
@@ -57,9 +57,7 @@ Get the URI from the Supabase project's **Connect → Direct → Session pooler*
 
 With the Data API disabled, Supabase's PostgREST service can repeatedly log `schema "pg_pgrst_no_exposed_schemas" does not exist` (`3F000`). This is a known Supabase issue and does not come from SmartFind queries or change the direct PostgreSQL connection's access rules. If the entries are distracting, use the [official workaround](https://supabase.com/docs/guides/troubleshooting/schema-pg_pgrst_no_exposed_schemas-does-not-exist) in the project's SQL Editor; it exposes only an empty schema to PostgREST while leaving the Data API disabled for SmartFind.
 
-When the URL is configured, the **Admin Management** page offers **Import existing SQLite data to Supabase**. It copies reports, inbox notifications, email status, and app metadata from the SQLite file available to that app instance. Import is idempotent by report/notification ID. Review the reported import counts before using the new backend. To move data from your development computer, run the local app with the same Supabase URL in its local secrets and use the migration button there; a cloud app cannot read the SQLite file on your computer. Keep a backup of the source database until migration is verified.
-
-Without `database_url`, local development continues to use `data/smartfind.db`. The migrated photo thumbnails remain embedded in report JSON; for larger-scale use, move them to a private Supabase Storage bucket. Supabase Free currently includes 500 MB of database storage and can pause a project after a week of inactivity; check the [current plan limits](https://supabase.com/pricing).
+`database_url` is required. Reports and notification data are stored only in Supabase; uploaded photo thumbnails remain embedded in report JSON. For larger-scale use, move them to a private Supabase Storage bucket. Supabase Free currently includes 500 MB of database storage and can pause a project after a week of inactivity; check the [current plan limits](https://supabase.com/pricing).
 
 ### Gmail notifications
 
@@ -73,23 +71,21 @@ The app uses RapidOCR with ONNX Runtime as its primary OCR engine; install it wi
 
 ## Browser deployment
 
-The included `Dockerfile` builds a browser-accessible container. Build and run it with Docker, publishing port `8501`; mount a persistent host directory at `/app/data` so SQLite reports survive container replacement. For Streamlit Community Cloud, deploy `main.py` and retain `models/best.pt` in the repository. That platform's local filesystem may be ephemeral; use persistent storage before relying on it for real reports.
-
-Set `SMARTFIND_DB_PATH` to a writable persistent SQLite path when deploying. Streamlit Community Cloud local storage may be ephemeral; for durable public use, move reports and inbox notifications to managed persistent storage. Uploaded photos are stored as thumbnails in the report database.
+The included `Dockerfile` builds a browser-accessible container. Build and run it with Docker, publishing port `8501`. For Streamlit Community Cloud, deploy `main.py`, retain `models/best.pt` in the repository, and configure the Supabase secret.
 
 ## How suggestions and matches work
 
 1. A user uploads or takes a photo in the lost/found form.
 2. If YOLO detects an item, the detected crop is analyzed. If it returns no box, SmartFind still runs OCR on the full photo and estimates color from its center region; the category must then be selected manually.
 3. RapidOCR reads text and matches it to canonical brand labels, including configured legal-name aliases. The brand form is a category-specific list with OCR candidates, an Unknown choice, and a manual Other option. Color is a rough pixel estimate.
-4. Confirmed category, color, canonical brand, date, location, description, owner identity, and photo thumbnail are saved in SQLite locally or Supabase PostgreSQL when configured.
+4. Confirmed category, color, canonical brand, date, location, description, owner identity, and photo thumbnail are saved in Supabase PostgreSQL.
 5. The matching agent compares open Lost and Found reports. Brand shares the existing 10-point description allocation when either report supplies a brand (5 points each); otherwise legacy scoring is unchanged. Strong possible matches create persistent, per-owner inbox notifications; each owner can mark them read. When SMTP is configured, one email is sent to each owner. Scores are rule-based similarity, not probabilities or proof of ownership.
 
 YOLO category detection is not instance-level image matching: two objects of the same category are not visually proven to be the same object. The trained model's embedded class names are used to populate the category choices. Color estimation is a basic pixel heuristic and can be affected by lighting/backgrounds; in no-detection fallback it samples the image center. OCR may miss stylized text and does not recognize logo graphics. With no detected category, OCR checks the whole photo against the combined brand shortlist, which may increase false positives; the user must confirm any suggested brand.
 
 ## Data, tests, and current limitations
 
-- Local reports are stored in `data/smartfind.db`; demo records seed SQLite only on its first empty launch. Configured Supabase projects start empty until the admin imports data.
+- Supabase projects start empty; there are no local demo records or SQLite migration path.
 - Run the pure-logic and storage/vision tests with `python -m unittest -v`.
 - Notifications persist in each owner's inbox; SMTP email requires Gmail credentials in Streamlit Secrets.
 - Use authentic photos from the supported classes to evaluate model accuracy and tune the confidence threshold before operational use.
