@@ -1,6 +1,7 @@
 """Run with:  python -m unittest -v      (no Streamlit needed)"""
 import unittest
 import importlib.util
+from contextlib import nullcontext
 import sys
 import types
 from pathlib import Path
@@ -226,11 +227,48 @@ class VisionScopeTests(unittest.TestCase):
             model.device = device
             return model
 
+        allowed_classes = []
+
+        def safe_globals(classes):
+            allowed_classes.extend(classes)
+            return nullcontext()
+
+        common_classes = {
+            name: type(name, (), {})
+            for name in ("Bottleneck", "C3", "Concat", "Conv", "SPPF")
+        }
+        yolo_classes = {
+            name: type(name, (), {}) for name in ("Detect", "DetectionModel")
+        }
+        nn_classes = {
+            name: type(name, (), {})
+            for name in ("BatchNorm2d", "Conv2d", "ModuleList", "Sequential",
+                         "SiLU", "MaxPool2d", "Upsample")
+        }
+        models_package = types.ModuleType("models")
+        models_package.__path__ = []
+        common_module = types.ModuleType("models.common")
+        common_module.__dict__.update(common_classes)
+        yolo_module = types.ModuleType("models.yolo")
+        yolo_module.__dict__.update(yolo_classes)
+        torch_module = types.ModuleType("torch")
+        torch_module.serialization = types.SimpleNamespace(safe_globals=safe_globals)
+        nn_module = types.ModuleType("torch.nn")
+        nn_module.__dict__.update(nn_classes)
+        torch_module.nn = nn_module
+        models_package.common = common_module
+        models_package.yolo = yolo_module
+
         smartfind_vision._load_model.cache_clear()
         try:
             with patch.dict(sys.modules, {
                 "ultralytics": types.SimpleNamespace(YOLO=FakeYOLO),
                 "yolov5": types.SimpleNamespace(load=load_yolov5),
+                "torch": torch_module,
+                "torch.nn": nn_module,
+                "models": models_package,
+                "models.common": common_module,
+                "models.yolo": yolo_module,
             }):
                 first = smartfind_vision._load_model("v1")
                 second = smartfind_vision._load_model("v2")
@@ -239,6 +277,8 @@ class VisionScopeTests(unittest.TestCase):
             self.assertEqual(second.device, "cpu")
             self.assertEqual(second.conf, smartfind_vision.CONFIDENCE_THRESHOLD)
             self.assertEqual(len(created), 2)
+            self.assertIn(yolo_classes["DetectionModel"], allowed_classes)
+            self.assertIn(common_classes["C3"], allowed_classes)
         finally:
             smartfind_vision._load_model.cache_clear()
 

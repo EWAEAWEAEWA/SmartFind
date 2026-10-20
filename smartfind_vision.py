@@ -10,6 +10,8 @@ from difflib import SequenceMatcher
 import io
 import os
 import re
+from collections import OrderedDict
+from pathlib import PosixPath
 
 _MODEL_DIRECTORY = Path(__file__).parent / "models"
 MODEL_PATHS = {
@@ -150,6 +152,26 @@ def normalize_brand_candidates(candidates, detected_brand=None):
     return ordered
 
 
+def _load_yolov5_model(model_path):
+    """Load the trusted project checkpoint using PyTorch's restricted unpickler."""
+    import torch
+    from models.common import Bottleneck, C3, Concat, Conv, SPPF
+    from models.yolo import Detect, DetectionModel
+    from torch.nn import (BatchNorm2d, Conv2d, ModuleList, Sequential, SiLU,
+                         MaxPool2d, Upsample)
+    from yolov5 import load
+
+    safe_classes = [
+        Bottleneck, C3, Concat, Conv, SPPF, Detect, DetectionModel,
+        BatchNorm2d, Conv2d, ModuleList, Sequential, SiLU, MaxPool2d, Upsample,
+        OrderedDict, PosixPath, set,
+    ]
+    with torch.serialization.safe_globals(safe_classes):
+        model = load(str(model_path), device="cpu")
+    model.conf = CONFIDENCE_THRESHOLD
+    return model
+
+
 @lru_cache(maxsize=2)
 def _load_model(model_version="v1"):
     if model_version not in MODEL_PATHS:
@@ -159,10 +181,7 @@ def _load_model(model_version="v1"):
         raise FileNotFoundError(f"YOLO model {model_version.upper()} was not found: {model_path}")
     try:
         if model_version == "v2":
-            from yolov5 import load
-            model = load(str(model_path), device="cpu")
-            model.conf = CONFIDENCE_THRESHOLD
-            return model
+            return _load_yolov5_model(model_path)
         from ultralytics import YOLO
         return YOLO(str(model_path))
     except ImportError as exc:
