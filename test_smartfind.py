@@ -48,6 +48,20 @@ class LocationTests(unittest.TestCase):
         self.assertEqual(compare_locations("Q-5312", "R-5312")[0], 0)                  # other building
         self.assertEqual(compare_locations("Q-5312", "Library")[0], 0)
 
+    def test_room_code_matches_inside_longer_location_text(self):
+        self.assertEqual(compare_locations("q-5312 po nakita", "Q-5312")[:1], (20,))
+
+    def test_shared_location_keyword_matches_inside_longer_text(self):
+        pts, detail, _, state_ = compare_locations("sa may auditorium", "near the auditorium entrance")
+        self.assertEqual((pts, detail, state_), (12, "Same location keyword", "partial"))
+
+    def test_close_location_keyword_matches_inside_longer_text(self):
+        pts, detail, _, state_ = compare_locations("sa may congre", "congregrating area")
+        self.assertEqual((pts, detail, state_), (8, "Close location keyword", "partial"))
+
+    def test_unrelated_keywords_do_not_match(self):
+        self.assertEqual(compare_locations("sa may congre", "near cafeteria")[0], 0)
+
     def test_missing_location_earns_nothing(self):
         for a, b in (("", ""), ("Laboratory", ""), ("  ", "Laboratory")):
             pts, _, _, st_ = compare_locations(a, b)

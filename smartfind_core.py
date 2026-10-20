@@ -8,6 +8,7 @@ It is NOT a probability and NOT proof that an item belongs to anyone.
 import re
 import unicodedata
 from datetime import datetime
+from difflib import SequenceMatcher
 
 MATCH_THRESHOLD = 40   # minimum score listed on the Possible Matches page
 NOTIFY_THRESHOLD = 75  # minimum score that creates a (simulated, in-app) notification
@@ -26,10 +27,14 @@ LOCATION_AREAS = {
     "Registrar":     ["registrar"],
 }
 
-_FILLER_WORDS = {"room", "rm", "the", "at", "in", "near"}
+_FILLER_WORDS = {"room", "rm", "the", "at", "in", "near", "sa", "may", "po", "ng"}
+_LOCATION_KEYWORD_STOP_WORDS = {
+    "area", "building", "campus", "floor", "entrance", "gate", "hall", "wing",
+    "seen", "saw", "found", "nakita",
+}
 # Room code like "Q-5312" / "Q5312": building letters + 3-4 digits.
 # ASSUMPTION: the FIRST digit is the floor (Q-5312 = building Q, 5th floor).
-_ROOM_RE = re.compile(r"([a-z]{1,3}) ?(\d{3,4})")
+_ROOM_RE = re.compile(r"\b([a-z]{1,3})\s+(\d{3,4})\b")
 
 
 def normalize_location(text):
@@ -39,10 +44,11 @@ def normalize_location(text):
     t = re.sub(r"[^a-z0-9]+", " ", t).strip()
     t = " ".join(w for w in t.split() if w not in _FILLER_WORDS)
     room = None
-    m = _ROOM_RE.fullmatch(t)
+    m = _ROOM_RE.search(t)
     if m:
         room = (m.group(1), m.group(2))
-        t = m.group(1) + m.group(2)          # "q 5312" and "q5312" become the same text
+        if m.span() == (0, len(t)):
+            t = m.group(1) + m.group(2)      # "q 5312" and "q5312" become the same text
     area = None
     for name, aliases in LOCATION_AREAS.items():
         if any(re.search(rf"\b{re.escape(a)}\b", t) for a in aliases):
@@ -59,6 +65,8 @@ def compare_locations(a, b):
     if na["text"] == nb["text"]:
         return 20, "Same campus room/area", "Match", "match"
     if na["room"] and nb["room"]:
+        if na["room"] == nb["room"]:
+            return 20, "Same campus room/area", "Match", "match"
         if na["room"][0] == nb["room"][0]:
             if na["room"][1][0] == nb["room"][1][0]:
                 return 12, "Same building and floor", "Partial", "partial"
@@ -66,6 +74,35 @@ def compare_locations(a, b):
         return 0, "Different building", "Differs", "differ"
     if na["area"] and na["area"] == nb["area"]:
         return 12, f"Same campus area ({na['area']})", "Partial", "partial"
+    if na["area"] and nb["area"] and na["area"] != nb["area"]:
+        return 0, "Different location", "Differs", "differ"
+
+    keywords_a = {
+        word for word in na["text"].split()
+        if len(word) >= 4 and not word.isdigit() and word not in _LOCATION_KEYWORD_STOP_WORDS
+    }
+    keywords_b = {
+        word for word in nb["text"].split()
+        if len(word) >= 4 and not word.isdigit() and word not in _LOCATION_KEYWORD_STOP_WORDS
+    }
+    if keywords_a & keywords_b:
+        return 12, "Same location keyword", "Partial", "partial"
+
+    for word_a in keywords_a:
+        for word_b in keywords_b:
+            shorter, longer = sorted((word_a, word_b), key=len)
+            prefix_match = (
+                len(shorter) >= 5
+                and longer.startswith(shorter)
+                and len(shorter) / len(longer) >= 0.45
+            )
+            close_spelling = (
+                len(shorter) >= 6
+                and abs(len(word_a) - len(word_b)) <= 2
+                and SequenceMatcher(None, word_a, word_b).ratio() >= 0.82
+            )
+            if prefix_match or close_spelling:
+                return 8, "Close location keyword", "Partial", "partial"
     return 0, "Different location", "Differs", "differ"
 
 
