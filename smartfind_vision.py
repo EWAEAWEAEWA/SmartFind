@@ -194,7 +194,7 @@ def _load_yolov5_model(model_path):
         *((getattr(common_module, name), f"models.common.{name}") for name in common_classes),
         *((getattr(yolo_module, name), f"models.yolo.{name}") for name in yolo_classes),
         BatchNorm2d, Conv2d, ModuleList, Sequential, SiLU, MaxPool2d, Upsample,
-        OrderedDict, PosixPath, set,
+        OrderedDict, PosixPath, (PosixPath, "pathlib._local.PosixPath"), set,
     ]
     with _yolov5_legacy_module_paths(), torch.serialization.safe_globals(safe_classes):
         model = load(str(model_path), device="cpu")

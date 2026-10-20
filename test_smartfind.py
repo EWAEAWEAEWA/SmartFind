@@ -294,6 +294,8 @@ class VisionScopeTests(unittest.TestCase):
             self.assertEqual(len(created), 2)
             self.assertIn((yolo_classes["DetectionModel"], "models.yolo.DetectionModel"), allowed_classes)
             self.assertIn((common_classes["C3"], "models.common.C3"), allowed_classes)
+            self.assertIn(
+                (smartfind_vision.PosixPath, "pathlib._local.PosixPath"), allowed_classes)
         finally:
             smartfind_vision._load_model.cache_clear()
 
