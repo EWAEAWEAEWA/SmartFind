@@ -31,7 +31,7 @@ from smartfind_store import (delete_report, load_notifications, load_reports,
                              mark_notification_read,
                              notification_keys, pending_notification_emails,
                              claim_notification_email, finish_notification_email,
-                             configure_supabase, migrate_sqlite_to_supabase, using_supabase,
+                             configure_supabase, initialize_storage, migrate_sqlite_to_supabase, using_supabase,
                              retry_notification_email, save_notifications, save_report,
                              seed_reports_if_empty)
 from smartfind_mail import SMTPDeliveryError, is_configured, send_match_email, test_smtp_connection
@@ -103,6 +103,9 @@ def _current_user():
 
 current_user = _current_user()
 configure_supabase(current_user["supabase_database_url"])
+# Schema setup is an explicit, one-time migration step per app process.  Query
+# functions below only open a short-lived connection for their own operation.
+initialize_storage()
 
 # ============================================================
 # CONFIGURATION  (edit here — nothing else needs to change)
@@ -267,12 +270,9 @@ st.session_state.id_counter = max(
 # AGENT 3 — ACT   (persistent per-owner inbox notifications; no email is sent)
 # ============================================================
 
-def auto_monitor_and_notify():
-    """Persist owner inbox entries and deliver any queued email once."""
+def deliver_pending_notification_emails():
+    """Deliver queued email without recalculating every report pair."""
     fail_stuck_notification_emails()
-    notifications = new_notifications(
-        st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
-    save_notifications(notifications)
     if not is_configured(mail_config):
         return
     for notification in pending_notification_emails():
@@ -288,12 +288,19 @@ def auto_monitor_and_notify():
                                       timestamp=datetime.now().isoformat(timespec="seconds"))
 
 
+def auto_monitor_and_notify():
+    """Recalculate matches only after a report or its status has changed."""
+    notifications = new_notifications(
+        st.session_state.reports, notification_keys(), datetime.now().strftime("%b %d, %I:%M %p"))
+    save_notifications(notifications)
+    deliver_pending_notification_emails()
+
+
 try:
     mail_config = dict(st.secrets.get("mail", {}))
 except Exception:
     mail_config = {}
 
-auto_monitor_and_notify()
 st.session_state.notifications = load_notifications(current_user["email"])
 
 # ============================================================
@@ -484,6 +491,14 @@ details.rec[open] .rec-more {{ color:#2a9d8f; }}
 
 /* ---------- PHONE ---------- */
 @media (max-width: 700px) {{
+  /* Keep Streamlit's collapsed-sidebar control above the app's custom chrome. */
+  header[data-testid="stHeader"] {{ height:3.5rem; position:fixed; inset:0 0 auto 0; z-index:100000; pointer-events:none; }}
+  header[data-testid="stHeader"] button,
+  [data-testid="stSidebarCollapsedControl"] {{ display:flex !important; visibility:visible !important; opacity:1 !important;
+    pointer-events:auto; position:fixed; top:8px; left:8px; z-index:100001; min-width:44px; min-height:44px;
+    border-radius:8px; background:#0d2847 !important; color:#fff !important; }}
+  header[data-testid="stHeader"] button svg,
+  [data-testid="stSidebarCollapsedControl"] svg {{ fill:#fff !important; color:#fff !important; }}
   .top-header {{ padding:0 14px 0 56px; margin-bottom:16px; }}
   .top-header .user-name {{ display:none; }}
   .st-key-body_pad {{ padding:0 14px !important; }}
@@ -1018,7 +1033,7 @@ with body:
                 if email_status == "failed" and is_configured(mail_config) and button_cols[2].button(
                         "Retry email", key=f"notif_retry_{notification['id']}"):
                     if retry_notification_email(notification["id"], current_user["email"]):
-                        auto_monitor_and_notify()
+                        deliver_pending_notification_emails()
                     st.rerun()
                 if email_status == "failed":
                     if "check the inbox before retrying" in str(notification.get("email_error", "")).casefold():
@@ -1091,6 +1106,7 @@ with body:
             if st.button("Save changes", **STRETCH):
                 r["status"], r["location"] = new_status, new_loc.strip() or r["location"]
                 save_report(r)
+                auto_monitor_and_notify()
                 st.rerun()
 
         @st.dialog("Delete report")
@@ -1102,6 +1118,7 @@ with body:
             if st.button("Delete report", type="primary", **STRETCH):
                 st.session_state.reports = [x for x in st.session_state.reports if x["id"] != rid]
                 delete_report(rid)
+                auto_monitor_and_notify()
                 st.rerun()
 
         W = [2.6, 0.9, 1.3, 1.3, 0.8, 0.9, 0.9, 0.8]
@@ -1131,6 +1148,7 @@ with body:
                                    disabled=r["status"] == "Resolved"):
                         r["status"] = "Resolved"
                         save_report(r)
+                        auto_monitor_and_notify()
                         st.rerun()
                     if c[7].button("Delete", key=f"a_del_{rid}", **STRETCH):
                         delete_dialog(rid)

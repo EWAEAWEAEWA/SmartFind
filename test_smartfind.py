@@ -1,5 +1,7 @@
 """Run with:  python -m unittest -v      (no Streamlit needed)"""
 import unittest
+import sys
+import types
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -256,6 +258,79 @@ class VisionScopeTests(unittest.TestCase):
 
 
 class ReportStoreTests(unittest.TestCase):
+    def test_sqlite_initialization_is_not_repeated_for_each_operation(self):
+        old_path = smartfind_store.DB_PATH
+        try:
+            with TemporaryDirectory() as directory:
+                smartfind_store.DB_PATH = Path(directory) / "once.db"
+                target = ("sqlite", str(smartfind_store.DB_PATH.resolve()))
+                smartfind_store._INITIALIZED_TARGETS.discard(target)
+                smartfind_store.initialize_storage()
+                self.assertIn(target, smartfind_store._INITIALIZED_TARGETS)
+                smartfind_store.save_report(report("L1", "Lost"))
+                self.assertEqual(len(smartfind_store.load_reports()), 1)
+                # The backend remains marked initialized after normal operations.
+                self.assertIn(target, smartfind_store._INITIALIZED_TARGETS)
+        finally:
+            smartfind_store.DB_PATH = old_path
+
+    def test_postgres_schema_is_initialized_once_and_queries_contain_no_ddl(self):
+        class FakeCursor:
+            rowcount = 1
+
+            def fetchall(self):
+                return []
+
+            def fetchone(self):
+                return None
+
+        class FakeConnection:
+            def __init__(self):
+                self.statements = []
+                self.commits = 0
+                self.closed = False
+
+            def execute(self, statement, params=None):
+                self.statements.append(statement)
+                return FakeCursor()
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        connections = []
+
+        def connect(*_args, **_kwargs):
+            connection = FakeConnection()
+            connections.append(connection)
+            return connection
+
+        old_url = smartfind_store._SUPABASE_DATABASE_URL
+        old_initialized = set(smartfind_store._INITIALIZED_TARGETS)
+        fake_psycopg = types.SimpleNamespace(connect=connect)
+        try:
+            smartfind_store._INITIALIZED_TARGETS.clear()
+            smartfind_store.configure_supabase("postgresql://example.test/smartfind")
+            with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+                smartfind_store.initialize_storage()
+                self.assertEqual(len(connections), 1)
+                ddl = connections[0].statements
+                self.assertTrue(any("CREATE TABLE" in statement for statement in ddl))
+                self.assertTrue(any("ENABLE ROW LEVEL SECURITY" in statement for statement in ddl))
+                with smartfind_store._connect() as connection:
+                    connection.execute("SELECT payload::text FROM reports")
+                self.assertEqual(len(connections), 2)
+                self.assertEqual(connections[1].statements, ["SELECT payload::text FROM reports"])
+        finally:
+            smartfind_store.configure_supabase(old_url)
+            smartfind_store._INITIALIZED_TARGETS.clear()
+            smartfind_store._INITIALIZED_TARGETS.update(old_initialized)
+
     def test_reports_persist_and_old_records_get_brand_default(self):
         old_path = smartfind_store.DB_PATH
         try:
@@ -322,6 +397,16 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(resolve_role("admin@example.com", True, [], ["ADMIN@example.com"]), "admin")
         self.assertIsNone(resolve_role("user@other.edu", True, ["tip.edu.ph"], []))
         self.assertIsNone(resolve_role("user@tip.edu.ph", False, ["tip.edu.ph"], []))
+
+
+class MobileNavigationTests(unittest.TestCase):
+    def test_mobile_css_keeps_native_sidebar_hamburger_visible_and_tappable(self):
+        source = Path("main.py").read_text(encoding="utf-8")
+        mobile_css = source[source.index("@media (max-width: 700px)"):]
+        self.assertIn('[data-testid="stSidebarCollapsedControl"]', mobile_css)
+        self.assertIn("visibility:visible !important", mobile_css)
+        self.assertIn("pointer-events:auto", mobile_css)
+        self.assertIn("min-width:44px", mobile_css)
 
 
 class EmailDeliveryTests(unittest.TestCase):

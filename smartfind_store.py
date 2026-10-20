@@ -5,9 +5,12 @@ from pathlib import Path
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 DB_PATH = Path(os.environ.get("SMARTFIND_DB_PATH", Path(__file__).parent / "data" / "smartfind.db"))
 _SUPABASE_DATABASE_URL = ""
+_INITIALIZED_TARGETS = set()
+_INITIALIZATION_LOCK = Lock()
 
 
 def configure_supabase(database_url):
@@ -19,45 +22,125 @@ def using_supabase():
     return bool(_SUPABASE_DATABASE_URL)
 
 
+def _storage_target():
+    """A stable key for the backend currently selected by the app."""
+    return ("postgres", _SUPABASE_DATABASE_URL) if using_supabase() else ("sqlite", str(DB_PATH.resolve()))
+
+
+def _postgres_connection():
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError("Supabase storage requires psycopg. Install requirements.txt.") from exc
+    return psycopg.connect(_SUPABASE_DATABASE_URL, sslmode="require", connect_timeout=10)
+
+
+def initialize_storage():
+    """Apply this backend's schema once per process, outside normal query paths.
+
+    The statements are deliberately idempotent so first starts in separate app
+    processes remain safe.  Normal reads and writes never execute schema DDL.
+    """
+    target = _storage_target()
+    if target in _INITIALIZED_TARGETS:
+        return
+    with _INITIALIZATION_LOCK:
+        if target in _INITIALIZED_TARGETS:
+            return
+        if using_supabase():
+            connection = _postgres_connection()
+            try:
+                connection.execute("""CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS notifications (
+                    id BIGSERIAL PRIMARY KEY,
+                    key TEXT NOT NULL UNIQUE,
+                    pair_key TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    item TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    read_at TEXT,
+                    email_status TEXT NOT NULL DEFAULT 'pending',
+                    email_attempted_at TEXT,
+                    email_sent_at TEXT,
+                    email_error TEXT
+                )""")
+                connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_status TEXT NOT NULL DEFAULT 'pending'")
+                connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_attempted_at TEXT")
+                connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_sent_at TEXT")
+                connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_error TEXT")
+                # Keep the existing table-level access posture; direct database
+                # connections continue to use the configured database role.
+                connection.execute("ALTER TABLE reports ENABLE ROW LEVEL SECURITY")
+                connection.execute("ALTER TABLE app_meta ENABLE ROW LEVEL SECURITY")
+                connection.execute("ALTER TABLE notifications ENABLE ROW LEVEL SECURITY")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        else:
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(DB_PATH, timeout=15)
+            try:
+                connection.execute("""CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key TEXT NOT NULL UNIQUE,
+                    pair_key TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    item TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    read_at TEXT,
+                    email_status TEXT NOT NULL DEFAULT 'pending',
+                    email_attempted_at TEXT,
+                    email_sent_at TEXT,
+                    email_error TEXT
+                )""")
+                notification_columns = {row[1] for row in connection.execute(
+                    "PRAGMA table_info(notifications)").fetchall()}
+                if "email_status" not in notification_columns:
+                    connection.execute("ALTER TABLE notifications ADD COLUMN email_status TEXT NOT NULL DEFAULT 'legacy'")
+                    connection.execute("UPDATE notifications SET email_status = 'legacy'")
+                    notification_columns.add("email_status")
+                for column, definition in (("email_attempted_at", "TEXT"),
+                                           ("email_sent_at", "TEXT"),
+                                           ("email_error", "TEXT")):
+                    if column not in notification_columns:
+                        connection.execute(f"ALTER TABLE notifications ADD COLUMN {column} {definition}")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        _INITIALIZED_TARGETS.add(target)
+
+
 @contextmanager
 def _connect():
+    """Open one short-lived transactional connection for one storage operation."""
     if using_supabase():
+        initialize_storage()
+        connection = _postgres_connection()
         try:
-            import psycopg
-        except ImportError as exc:
-            raise RuntimeError("Supabase storage requires psycopg. Install requirements.txt.") from exc
-        connection = psycopg.connect(_SUPABASE_DATABASE_URL, sslmode="require", connect_timeout=10)
-        try:
-            connection.execute("""CREATE TABLE IF NOT EXISTS reports (
-                id TEXT PRIMARY KEY,
-                payload JSONB NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )""")
-            connection.execute("""CREATE TABLE IF NOT EXISTS app_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )""")
-            connection.execute("""CREATE TABLE IF NOT EXISTS notifications (
-                id BIGSERIAL PRIMARY KEY,
-                key TEXT NOT NULL UNIQUE,
-                pair_key TEXT NOT NULL,
-                recipient TEXT NOT NULL,
-                item TEXT NOT NULL,
-                score INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                read_at TEXT,
-                email_status TEXT NOT NULL DEFAULT 'pending',
-                email_attempted_at TEXT,
-                email_sent_at TEXT,
-                email_error TEXT
-            )""")
-            connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_status TEXT NOT NULL DEFAULT 'pending'")
-            connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_attempted_at TEXT")
-            connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_sent_at TEXT")
-            connection.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_error TEXT")
-            connection.execute("ALTER TABLE reports ENABLE ROW LEVEL SECURITY")
-            connection.execute("ALTER TABLE app_meta ENABLE ROW LEVEL SECURITY")
-            connection.execute("ALTER TABLE notifications ENABLE ROW LEVEL SECURITY")
             yield connection
             connection.commit()
         except Exception:
@@ -67,44 +150,9 @@ def _connect():
             connection.close()
         return
 
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    initialize_storage()
     connection = sqlite3.connect(DB_PATH, timeout=15)
     try:
-        connection.execute("""CREATE TABLE IF NOT EXISTS reports (
-            id TEXT PRIMARY KEY,
-            payload TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS app_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT NOT NULL UNIQUE,
-            pair_key TEXT NOT NULL,
-            recipient TEXT NOT NULL,
-            item TEXT NOT NULL,
-            score INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            read_at TEXT,
-            email_status TEXT NOT NULL DEFAULT 'pending',
-            email_attempted_at TEXT,
-            email_sent_at TEXT,
-            email_error TEXT
-        )""")
-        notification_columns = {row[1] for row in connection.execute(
-            "PRAGMA table_info(notifications)").fetchall()}
-        if "email_status" not in notification_columns:
-            connection.execute("""ALTER TABLE notifications ADD COLUMN email_status
-                TEXT NOT NULL DEFAULT 'legacy'""")
-            connection.execute("UPDATE notifications SET email_status = 'legacy'")
-            notification_columns.add("email_status")
-        for column, definition in (
-            ("email_attempted_at", "TEXT"),
-                ("email_sent_at", "TEXT"),
-                ("email_error", "TEXT")):
-            if column not in notification_columns:
-                connection.execute(f"ALTER TABLE notifications ADD COLUMN {column} {definition}")
         yield connection
         connection.commit()
     except Exception:
